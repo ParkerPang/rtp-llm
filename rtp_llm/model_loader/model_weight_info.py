@@ -82,9 +82,7 @@ class ModelWeightInfo:
         if self.weights:
             for weight in self.weights:
                 weights.append(weight.create(weight, quant_config))
-        layer_weights: Union[List[WeightModule], List[List[WeightModule]]] = (
-            [] if self.layer_weights else None
-        )
+        layer_weights: Union[List[WeightModule], List[List[WeightModule]]] = []
         if self.layer_weights:
             for weight in self.layer_weights:
                 if isinstance(weight, list):
@@ -310,7 +308,7 @@ class ModelDeployWeightInfo:
 
         if (
             isinstance(self, BaseMultiModalWeightInfo)
-            and self.vit_separation != VitSeparation.VIT_SEPARATION_REMOTE
+            and self._only_load_mm_weights
             and self.tp_rank == 0
         ):
             weight_info = self._get_vit_info(weight_info)
@@ -588,7 +586,7 @@ class ModelDeployWeightInfo:
         if (
             database.is_ft_style
             and database.ft_weight_params
-            and self.vit_separation != VitSeparation.VIT_SEPARATION_ROLE
+            and not self._only_load_mm_weights
         ):
             src_tp_size = int(database.ft_weight_params.get("TP_SIZE", self.tp_size))
             src_dp_size = int(database.ft_weight_params.get("DP_SIZE", self.dp_size))

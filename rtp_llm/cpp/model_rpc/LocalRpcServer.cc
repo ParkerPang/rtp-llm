@@ -15,42 +15,34 @@ using namespace std;
 namespace rtp_llm {
 
 grpc::Status LocalRpcServer::init(const EngineInitParams&                       maga_init_params,
-                                  py::object                                    mm_process_engine,
                                   std::unique_ptr<ProposeModelEngineInitParams> propose_params) {
     meta_.reset(new RpcServerRuntimeMeta());
     maga_init_params_ = maga_init_params;
     weight_manager_   = maga_init_params.weight_manager;
     metrics_reporter_ = maga_init_params.metrics_reporter;
     RTP_LLM_LOG_INFO("LocalRpcServer aux_string %s", maga_init_params_.misc_config.aux_string.c_str());
-    propose_maga_init_params_ = propose_params.get();
-    if (maga_init_params_.parallelism_config.tp_rank == 0
-        && !maga_init_params_.runtime_config.worker_grpc_addrs.empty()) {
-        profile_broadcaster_ = std::make_shared<BroadcastManager>(maga_init_params_.runtime_config.worker_grpc_addrs);
-        if (!profile_broadcaster_->init()) {
-            RTP_LLM_LOG_WARNING("failed to init profile broadcaster");
-            profile_broadcaster_.reset();
-        }
-    }
+    const bool use_new_sp_engine = maga_init_params_.sp_config.use_new_sp_engine;
+    propose_maga_init_params_    = propose_params.get();
 
-    {
+    if (propose_params && !use_new_sp_engine) {
         pybind11::gil_scoped_release release;
         RTP_LLM_CHECK_WITH_INFO(!PyGILState_Check(),
                                 "running engine init with gil held may cause program hang, please check");
-        engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params)));
-    }
-    if (!mm_process_engine.is_none()) {
-        auto vit_separation = maga_init_params.vit_config.vit_separation;
-        if (vit_separation == VitSeparation::VIT_SEPARATION_REMOTE) {
-            mm_processor_.reset(new RemoteMultimodalProcessor(mm_process_engine,
-                                                              maga_init_params.model_config_.mm_model_config,
-                                                              maga_init_params.model_config_.max_seq_len));
-        } else if (vit_separation == VitSeparation::VIT_SEPARATION_LOCAL) {
-            mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,
-                                                             maga_init_params.model_config_.mm_model_config,
-                                                             maga_init_params.model_config_.max_seq_len));
-        } else {
-            return grpc::Status(grpc::StatusCode::INTERNAL, "invalid vit separation value in config");
+        std::unique_ptr<SpeculativeEngine> sp_engine =
+            std::make_unique<SpeculativeEngine>(maga_init_params, std::move(propose_params));
+        auto status = sp_engine->init();
+        if (!status.ok()) {
+            return grpc::Status(grpc::StatusCode::INTERNAL, status.ToString());
         }
+        engine_ = std::move(sp_engine);
+    } else {
+        {
+            pybind11::gil_scoped_release release;
+            RTP_LLM_CHECK_WITH_INFO(!PyGILState_Check(),
+                                    "running engine init with gil held may cause program hang, please check");
+            engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params)));
+        }
+        mm_processor_.reset(new RemoteMultimodalProcessor(maga_init_params.model_config_.mm_model_config, maga_init_params.model_config_.max_seq_len));
     }
 
     return grpc::Status::OK;
