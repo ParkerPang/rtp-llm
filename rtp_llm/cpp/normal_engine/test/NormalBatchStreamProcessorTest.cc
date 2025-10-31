@@ -39,7 +39,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
 
     RuntimeConfig              runtime_config;
     NormalBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, nullptr, false);
     processor.setKVCacheGroupTypes({CacheGroupType::FULL});
 
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
@@ -123,7 +123,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         MMModelConfig mm_model_config;
         model_config.mm_model_config = mm_model_config;
         NormalBatchStreamProcessor processor(
-            model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+            model_config, pd_sep_config, profiling_debug_logging_config, cache_config, nullptr, false);
         processor.setKVCacheGroupTypes({CacheGroupType::FULL});
 
         StreamGroups stream_groups(streams);
@@ -164,7 +164,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
         stream->setRunning();
     }
     NormalBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, nullptr, false);
     processor.setKVCacheGroupTypes({CacheGroupType::FULL});
 
     StreamGroups stream_groups(streams);
@@ -243,7 +243,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
         stream->setRunning();
     }
     NormalBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, nullptr, false);
     processor.setKVCacheGroupTypes({CacheGroupType::FULL});
 
     StreamGroups stream_groups(streams);
@@ -291,7 +291,7 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
     CacheConfig                 cache_config;
     RuntimeConfig               runtime_config;
     NormalBatchStreamProcessor  processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, nullptr, false);
     processor.setKVCacheGroupTypes({CacheGroupType::FULL});
 
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
