@@ -23,6 +23,7 @@ from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
 from rtp_llm.distribute.distributed_server import get_world_info
+from rtp_llm.distribute.worker_info import WorkerInfo, g_worker_info
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.frontend.frontend_worker import get_dp_addrs_from_world_info
@@ -355,6 +356,8 @@ class FrontendApp(object):
             return self.frontend_server.tokenize(req)
 
         if self.frontend_server.is_embedding:
+            from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
+
             # embedding
             @app.post("/v1/embeddings/similarity")
             @app.post("/v1/reranker")

@@ -24,7 +24,12 @@ from rtp_llm.config.py_config_modules import (
     VitConfig,
 )
 from rtp_llm.model_factory_register import _model_factory
-from rtp_llm.ops import ProfilingDebugLoggingConfig, SpeculativeType, VitSeparation
+from rtp_llm.ops import (
+    ProfilingDebugLoggingConfig,
+    SpeculativeType,
+    TaskType,
+    VitSeparation,
+)
 from rtp_llm.utils.util import check_with_info
 
 
@@ -113,6 +118,8 @@ class ModelFactory:
         Returns:
             ProposeModel instance or None if no propose model needed
         """
+        from rtp_llm.models.propose_model.propose_model import ProposeModel
+
         sp_type = engine_config.sp_config.type  # Get SpeculativeType enum value
         if sp_type == SpeculativeType.NONE:
             return None
@@ -203,6 +210,8 @@ class ModelFactory:
         # Set gen_num_per_cycle on model_config so it flows to AttentionConfigs
         # for RoPE cache sizing in speculative decoding
         model_config.gen_num_per_cycle = engine_config.sp_config.gen_num_per_cycle
+
+        from rtp_llm.async_decoder_engine.engine_creator import create_engine
 
         model = ModelFactory._create_model(
             model_config=model_config,
