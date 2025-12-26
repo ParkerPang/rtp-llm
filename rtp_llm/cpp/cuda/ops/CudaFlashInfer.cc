@@ -358,7 +358,8 @@ bool FlashInferAttnParams::check(const rtp_llm::AttentionConfigs& attn_configs,
         bool kv_cache_dtype_valid = (attn_configs.kv_cache_dtype == KvCacheDataType::BASE
                                      || attn_configs.kv_cache_dtype == KvCacheDataType::FP8);
         bool rope_style_valid =
-            (attn_configs.rope_config.style == RopeStyle::Base || attn_configs.rope_config.style == RopeStyle::No);
+            (attn_configs.rope_config.style == RopeStyle::Base || attn_configs.rope_config.style == RopeStyle::No
+             || attn_configs.rope_config.style == RopeStyle::Mrope);
         bool is_causal_valid = attn_configs.is_causal;
         bool q_scaling_valid = (attn_configs.q_scaling == 1.0f);
         bool logn_attn_valid = !attn_configs.use_logn_attn;
@@ -370,7 +371,7 @@ bool FlashInferAttnParams::check(const rtp_llm::AttentionConfigs& attn_configs,
         RTP_LLM_LOG_DEBUG("FlashInfer check conditions (use_mla=false): "
                           "dtype_valid=%d (dtype=%d, expected: FP16/BF16/FP8_E4M3) | "
                           "kv_cache_dtype_valid=%d (kv_cache_dtype=%d, expected: BASE/FP8) | "
-                          "rope_style_valid=%d (rope_style=%d, expected: Base/No) | "
+                          "rope_style_valid=%d (rope_style=%d, expected: Base/No/Mrope) | "
                           "is_causal_valid=%d (is_causal=%d) | "
                           "q_scaling_valid=%d (q_scaling=%f, expected: 1.0) | "
                           "logn_attn_valid=%d (use_logn_attn=%d, expected: false) | "

@@ -15,7 +15,7 @@ from rtp_llm.models_py.modules import (
     RMSNorm,
 )
 from rtp_llm.ops import HWKernelConfig, ParallelismConfig
-from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
+from rtp_llm.ops.compute_ops import KVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 
@@ -38,7 +38,6 @@ class Qwen3DecoderLayer(nn.Module):
             config.layernorm_eps,
             quant_config,
             hw_kernel_config,
-            layer_idx,
         )
         self.mlp = DenseMLP(
             config.activation_type,
@@ -57,6 +56,7 @@ class Qwen3DecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache] = None,
     ) -> torch.Tensor:
@@ -64,7 +64,10 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
         # Self Attention
         hidden_states = self.self_attn(
-            hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
+            hidden_states=hidden_states,
+            position_ids=position_ids,
+            fmha_impl=fmha_impl,
+            kv_cache=kv_cache,
         )
         hidden_states = residual + hidden_states
 
@@ -107,7 +110,6 @@ class Qwen3Model(GptModelBase):
                 Qwen3DecoderLayer(
                     config,
                     parallelism_config,
-                    idx,
                     weights.weights[idx],
                     quant_config,
                     py_hw_kernel_config,
@@ -125,10 +127,13 @@ class Qwen3Model(GptModelBase):
         hidden_states = inputs_embeds
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
+            fmha_impl.prepare(inputs.attention_inputs)
+        position_ids = inputs.attention_inputs.combo_position_ids
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             select_block_map_for_layer(inputs.attention_inputs, i)
             hidden_states = decoder_layer(
                 hidden_states,
+                position_ids,
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )

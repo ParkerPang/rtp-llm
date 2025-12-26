@@ -106,10 +106,30 @@ class FMHAImplBase(ABC):
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[LayerKVCache],
-        layer_idx: int = 0,
+        position_ids: Optional[torch.Tensor] = None,
+        kv_cache: Optional[KVCache] = None,
+        need_rope_kv_cache: bool = True,
     ) -> torch.Tensor:
-        """执行前向传播计算。
+        assert self.rope_kvcache_impl is not None and self.rope_params is not None
+        if need_rope_kv_cache:
+            fmha_input = self.rope_kvcache_impl.forward(
+                qkv,
+                position_ids=position_ids,
+                fmha_type=self.fmha_type(),
+                kv_cache=kv_cache,
+                params=self.rope_params,
+            )
+        else:
+            fmha_input = qkv
+        if (
+            self.attn_inputs.is_prefill
+            and self.attn_inputs.cache_store_inputs
+            and self.write_cache_store_impl is not None
+        ):
+            self.write_cache_store_impl(kv_cache)
+        assert self.fmha_impl is not None
+        res = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        return res
 
         Args:
             qkv: 输入的 QKV 张量

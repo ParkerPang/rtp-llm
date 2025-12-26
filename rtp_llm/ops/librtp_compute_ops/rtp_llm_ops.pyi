@@ -163,6 +163,13 @@ class FusedMoEOp:
 
     def forward(self, hidden_states: torch.Tensor, up_proj: torch.Tensor, down_proj: torch.Tensor, expert_scales: torch.Tensor, expert_ids: torch.Tensor, outputs: torch.Tensor) -> None:
         ...
+class FusedRopeKVCacheDecodeOp:
+    def __init__(self, attn_configs: libth_transformer_config.AttentionConfigs) -> None:
+        ...
+    def forward(self, qkv: torch.Tensor, position_ids: torch.Tensor | None = None, fmha_type: libth_transformer_config.FMHAType, kv_cache: librtp_compute_ops.KVCache | None, params: TRTAttn) -> torch.Tensor:
+        ...
+    def prepare(self, attn_inputs: librtp_compute_ops.PyAttentionInputs) -> TRTAttn:
+        ...
 
 
 class GroupTopKOp:
@@ -320,8 +327,7 @@ def dispose_communicator(comm_ptr: int) -> None:
     Dispose UbCommunicator with python address and release resources
     """
 
-
-def embedding(output: torch.Tensor, input: torch.Tensor, weight: torch.Tensor) -> None:
+def embedding(output: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, position_ids: torch.Tensor | None = None, token_type_ids: torch.Tensor | None = None, text_tokens_mask: torch.Tensor | None = None) -> None:
     """
     Embedding lookup kernel
     """

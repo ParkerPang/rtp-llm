@@ -144,8 +144,24 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("fuse_silu_and_mul"),
                   py::arg("masked_m"));
 
-    rtp_ops_m.def(
-        "embedding", &embedding, "Embedding lookup kernel", py::arg("output"), py::arg("input"), py::arg("weight"));
+    rtp_ops_m.def("moe_topk_softmax",
+                  &moe_topk_softmax,
+                  "MoE Topk Softmax kernel",
+                  py::arg("topk_weights"),
+                  py::arg("topk_indices"),
+                  py::arg("token_expert_indices"),
+                  py::arg("gating_output"));
+
+    rtp_ops_m.def("embedding",
+                  &embedding,
+                  "Embedding lookup kernel",
+                  py::arg("output"),
+                  py::arg("input"),
+                  py::arg("weight"),
+                  py::arg("position_ids")     = py::none(),
+                  py::arg("token_type_ids")   = py::none(),
+                  py::arg("text_tokens_mask") = py::none());
+
     rtp_ops_m.def("embedding_bert",
                   &embeddingBert,
                   "EmbeddingBert lookup kernel",

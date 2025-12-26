@@ -54,12 +54,19 @@ class TRTMHAImpl(FMHAImplBase):
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[LayerKVCache],
-        layer_idx: Optional[int] = 0,
+        position_ids: Optional[torch.Tensor] = None,
+        kv_cache: Optional[KVCache] = None,
+        need_rope_kv_cache: bool = True,
     ) -> torch.Tensor:
-        # Apply RoPE and KV Cache processing
-        if self.need_rope_kv_cache:
-            fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+        assert self.rope_kvcache_impl is not None and self.rope_params is not None
+        if need_rope_kv_cache:
+            fmha_input = self.rope_kvcache_impl.forward(
+                qkv,
+                position_ids=position_ids,
+                fmha_type=self.fmha_type(),
+                kv_cache=kv_cache,
+                params=self.rope_params,
+            )
         else:
             fmha_input = qkv
 
