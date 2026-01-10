@@ -6,6 +6,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Union
 
+import requests
 from anyio import CapacityLimiter
 from anyio.lowlevel import RunVar
 from fastapi import Body, FastAPI, HTTPException
@@ -28,6 +29,7 @@ from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.frontend.frontend_worker import get_dp_addrs_from_world_info
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
+from rtp_llm.ops import RoleType, VitSeparation
 from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
 from rtp_llm.utils.util import AtomicCounter, async_request_server
 from rtp_llm.utils.version_info import VersionInfo
@@ -83,9 +85,22 @@ class FrontendApp(object):
             self.server_config.rpc_server_port, dp_addresses=dp_addresses
         )
 
+        self.vit_http_server_port = None
+        if (
+            py_env_configs.role_config.role_type != RoleType.FRONTEND
+            and py_env_configs.role_config.role_type != RoleType.DECODE
+            and py_env_configs.role_config.role_type != RoleType.VIT
+            and py_env_configs.vit_config.vit_separation
+            != VitSeparation.VIT_SEPARATION_REMOTE
+        ):
+            self.vit_http_server_port = WorkerInfo.vit_http_server_port_offset(
+                self.server_config.rank_id, g_worker_info.server_port
+            )
+
         logging.info(
             f"frontend app rank_id = {self.server_config.rank_id}, "
-            f"server_port = {self.server_config.server_port}, frontend_server_id = {self.server_config.frontend_server_id}"
+            f"server_port = {self.server_config.server_port}, frontend_server_id = {self.server_config.frontend_server_id}, "
+            f"need_check_vit_health = {self.vit_http_server_port is not None}, vit_http_server_port = {self.vit_http_server_port}"
         )
 
     async def _wait_backend_health_ready_impl(self) -> None:
@@ -202,6 +217,7 @@ class FrontendApp(object):
         @app.get("/status")
         @app.post("/status")
         @app.post("/health_check")
+        @app.get("/")
         async def health_check():
             if self.separated_frontend:
                 await check_all_health()
@@ -216,19 +232,27 @@ class FrontendApp(object):
                     status_code=400,
                     content={"error": f" HTTP health check failed"},
                 )
-            return "ok"
+            if self.vit_http_server_port:
+                try:
+                    vit_response = requests.get(
+                        f"http://localhost:{self.vit_http_server_port}/health",
+                        timeout=10,
+                    )
+                    if (
+                        vit_response.status_code != 200
+                        or vit_response.text.strip() != '"ok"'
+                    ):
+                        return ORJSONResponse(
+                            status_code=400,
+                            content={"error": f"VIT health check failed"},
+                        )
+                except BaseException as e:
+                    logging.debug(f"VIT health check failed: {e}")
+                    return ORJSONResponse(
+                        status_code=400,
+                        content={"error": f"VIT health check failed: {e}"},
+                    )
 
-        @app.get("/")
-        async def health():
-            if self.separated_frontend:
-                await check_all_health()
-                return {"status": "home"}
-            response = await self.grpc_client.post_request("health_check", {})
-            if response.get("status", "") != "ok":
-                return ORJSONResponse(
-                    status_code=400,
-                    content={"error": f" HTTP health check failed"},
-                )
             return "ok"
 
         @app.get("/cache_status")
