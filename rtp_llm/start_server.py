@@ -183,6 +183,21 @@ def start_frontend_server_impl(
     return frontend_processes
 
 
+def start_prompt_generator_impl(py_env_configs):
+    from internal_source.prompt_generator.service.start_server import (
+        start_prompt_generator,
+    )
+
+    processor = multiprocessing.Process(
+        target=start_prompt_generator,
+        args=(py_env_configs),
+        name="prompt_generator",
+    )
+    processor.start()
+    time.sleep(5)
+    return processor
+
+
 def main():
     py_env_configs: PyEnvConfigs = setup_args()
     setup_and_configure_server(py_env_configs)
@@ -226,6 +241,10 @@ def start_server(py_env_configs: PyEnvConfigs):
             global_controller, py_env_configs, process_manager
         )
         process_manager.add_processes(frontend_process)
+
+        logging.info("starting prompt generator server...")
+        prompt_generator_process = start_prompt_generator_impl(py_env_configs)
+        process_manager.add_process(prompt_generator_process)
 
         # Start parallel health checks and wait for completion
         if not process_manager.run_health_checks():
