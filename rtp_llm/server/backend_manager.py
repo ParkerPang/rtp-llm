@@ -40,7 +40,6 @@ class BackendManager(object):
             kmonitor.init()
         self.engine: Optional[BaseEngine] = None
         self._shutdown_requested = threading.Event()
-        self.mm_process_engine: Optional[MMProcessEngine] = mm_process_engine
 
     def start(self):
         """Initialize backend server without entering service loop"""
@@ -115,7 +114,6 @@ class BackendManager(object):
             vit_config=self.py_env_configs.vit_config,
             merge_lora=self.py_env_configs.lora_config.merge_lora,
             propose_model_config=propose_model_config,
-            mm_process_engine=self.mm_process_engine,
         )
         logging.info(
             "engine created successfully: self.engine.task_type=%s",

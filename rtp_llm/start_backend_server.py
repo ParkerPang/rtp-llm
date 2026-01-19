@@ -22,8 +22,6 @@ from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_cuda_device_and_accl_env,
 )
-from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
-from rtp_llm.ops import VitSeparation
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
@@ -38,7 +36,6 @@ def local_rank_start(
     py_env_configs: PyEnvConfigs,
     world_rank: int = 0,
     pipe_writer=None,
-    mm_process_engine: Optional[MMProcessEngine] = None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     backend_manager = None
@@ -79,7 +76,7 @@ def local_rank_start(
         if py_env_configs.parallelism_config.world_size > 1:
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
-        backend_manager = BackendManager(py_env_configs, mm_process_engine)
+        backend_manager = BackendManager(py_env_configs)
         backend_manager.start()
         logging.info("Backend server initialized successfully, sending ready status")
 
@@ -276,7 +273,6 @@ def multi_rank_start(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
-    mm_process_engine: Optional[MMProcessEngine] = None,
 ):
     """Start multi-rank backend server with proper process management"""
     try:
@@ -286,7 +282,7 @@ def multi_rank_start(
 
     # Create processes and get pipe readers
     processes, rank_pipe_readers = _create_rank_processes(
-        global_controller, py_env_configs, mm_process_engine
+        global_controller, py_env_configs
     )
     local_world_size = len(processes)
 
@@ -421,7 +417,6 @@ def start_backend_server(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
-    mm_process_engine: Optional[MMProcessEngine] = None,
 ):
     logging.info(f"[PROCESS_START]Start backend server process")
     setproctitle("rtp_llm_backend_server")

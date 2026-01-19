@@ -5,11 +5,16 @@ import torch
 from torch import nn
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
-
-from rtp_llm.config.model_config import VitParameters
-from rtp_llm.config.py_config_modules import VitConfig
-from rtp_llm.model_factory_register import register_model
-from rtp_llm.models.qwen2_vl.qwen2_vl import QWen2_VL, QwenVL2VitWeight, QWen2VLWeightInfo
+from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
+    BaseMultiModalMixin,
+    BaseVitWeights,
+)
+from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
+    MultiModalEmbeddingInterface,
+    MultimodalInput,
+    get_bytes_io_from_url,
+)
+from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.swizzle_utils import swizzle_tensor
 
 try:
@@ -18,11 +23,19 @@ except ModuleNotFoundError:
     VideoReader = None
     cpu = None
 
-from typing import List
+import math
 
+import torch
 import torch.library as tl
+from PIL import Image
+from torchvision import transforms
+from torchvision.transforms import InterpolationMode
 
-from rtp_llm.models.qwen2_vl.qwen2_vl_vit import (
+from rtp_llm.multimodal.multimodal_mixin_register import register_multimodal_mixin
+from rtp_llm.multimodal.multimodal_mixins.qwen2_5_vl.modeling_qwen2_5_vl import (
+    Qwen2_5_VisionTransformerPretrainedModel,
+)
+from rtp_llm.multimodal.multimodal_mixins.qwen2_vl.qwen2_vl_mixin import (
     FPS,
     FPS_MAX_FRAMES,
     FPS_MIN_FRAMES,
@@ -31,18 +44,13 @@ from rtp_llm.models.qwen2_vl.qwen2_vl_vit import (
     VIDEO_MAX_PIXELS,
     VIDEO_MIN_PIXELS,
     VIDEO_TOTAL_PIXELS,
-    Qwen2VLImageEmbedding,
+    Qwen2_VLImageEmbedding,
+    Qwen2_VLMixin,
+    Qwen2_VLVitWeight,
     Qwen2VLImageProcessor,
     ceil_by_factor,
     floor_by_factor,
     smart_resize,
-    timeout_decorator,
-)
-from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
-from rtp_llm.utils.base_model_datatypes import (
-    MMPreprocessConfig,
-    MMUrlType,
-    MultimodalInput,
 )
 
 if not hasattr(tl, "wrap_triton"):
@@ -76,10 +84,9 @@ def smart_nframes(configs, total_frames, video_fps) -> int:
     return nframes
 
 
-class Qwen2_5_VLImageEmbedding(Qwen2VLImageEmbedding):
+class Qwen2_5_VLImageEmbedding(Qwen2_VLImageEmbedding):
     def __init__(self, config: ModelConfig):
         self.data_type = config.compute_dtype
-        super().__init__(config)
         self.mm_related_params = config.mm_related_params
         self.image_processor = Qwen2VLImageProcessor.from_pretrained(
             config.mm_related_params.config["ckpt_path"]
@@ -150,7 +157,7 @@ class Qwen2_5_VLImageEmbedding(Qwen2VLImageEmbedding):
         if mm_type == MMUrlType.DEFAULT:
             raise Exception("cannot infer multimodal input type")
         elif mm_type == MMUrlType.IMAGE:
-            data = Qwen2VLImageEmbedding.load_image(data, mm_input.config)
+            data = Qwen2_VLImageEmbedding.load_image(data, mm_input.config)
             res = processor(images=data, videos=None, return_tensors="pt")
             return res["pixel_values"], res["image_grid_thw"]
         elif mm_type == MMUrlType.VIDEO:
@@ -161,114 +168,16 @@ class Qwen2_5_VLImageEmbedding(Qwen2VLImageEmbedding):
             raise Exception("unknown mm url type")
 
 
-class QWen2_5_VLWeightInfo(QWen2VLWeightInfo):
-    def _get_vit_info(self, llm_weights: "ModelWeightInfo") -> "ModelWeightInfo":
-        from rtp_llm.model_loader.weight_module import MMAtomicWeight
-        from rtp_llm.utils.model_weight import CkptWeightInfo, identity, sp_id
 
-        if self.vit_weights is not None:
-            weight_names = self.vit_weights.weight_names
-            ckpt_prefix = self.vit_weights.ckpt_prefix
-
-            for w in weight_names:
-                if ".gate_proj." in w:
-                    up_proj_name = w.replace(".gate_proj.", ".up_proj.")
-                    assert (
-                        up_proj_name in weight_names
-                    ), f"up_proj {up_proj_name} not found for gate_proj {w}"
-
-                    up_gate_proj_name = w.replace(".gate_proj.", ".up_gate_proj.")
-                    gate_proj_ckpt_name = ckpt_prefix + w
-                    up_proj_ckpt_name = ckpt_prefix + up_proj_name
-
-                    llm_weights.weights.append(
-                        MMAtomicWeight(
-                            up_gate_proj_name,
-                            [
-                                CkptWeightInfo(gate_proj_ckpt_name, identity),
-                                CkptWeightInfo(up_proj_ckpt_name, identity),
-                            ],
-                            lambda ts: torch.cat(ts, dim=0).contiguous(),
-                            split_func=sp_id,
-                        )
-                    )
-                elif ".up_gate_proj." in w:
-                    continue
-                w_name = ckpt_prefix + w
-                llm_weights.weights.append(
-                    MMAtomicWeight(
-                        w,
-                        [CkptWeightInfo(w_name, identity)],
-                        identity,
-                        split_func=sp_id,
-                    )
-                )
-        return llm_weights
-
-
-class QWen2_5_VL(QWen2_VL):
-    def _init_multimodal(
-        self,
-    ):
-        # mm_related_params is in model_config, not mm_model_config
-        mm_related_params = self.model_config.mm_related_params
-        self.mm_part = Qwen2_5_VLImageEmbedding(
-            mm_related_params, model_config=self.model_config
-        )
-        self.model_config.mm_related_params.vit_weights = QwenVL2VitWeight(
+class Qwen2_5_VLMixin(Qwen2_VLMixin):
+    def _init_multimodal(self):
+        self.mm_part = Qwen2_5_VLImageEmbedding(self.model_config)
+        self.model_config.mm_related_params.vit_weights = Qwen2_VLVitWeight(
             {"vit": self.mm_part.visual}
         )
 
-    @staticmethod
-    def get_weight_cls():
-        return QWen2_5_VLWeightInfo
-
 
     def load_mm_weight(
-        self,
-        model_config: Any = None,
-        ctype: str = "",
-        tp_size: int = 1,
-        tp_rank: int = 0,
-        device: str = "",
-        **kwargs,
-    ):
-        '''
-        重写 load_mm_weight 方法，在权重加载完成之后，按设备/配置做后置 patch（仅 ROCm 生效）
-        '''
-        if (
-            isinstance(model_config, str)
-            and isinstance(ctype, str)
-            and device == ""
-            and tp_size == 1
-            and tp_rank == 0
-        ):
-            looks_like_dtype = model_config in ("fp16", "bf16", "fp32", "float16", "bfloat16", "float32")
-            looks_like_device = (
-                ctype.startswith("cuda")
-                or ctype.startswith("hip")
-                or ctype.startswith("cpu")
-                or ctype.startswith("npu")
-            )
-            if looks_like_dtype and looks_like_device:
-                device = ctype
-                ctype = model_config
-                model_config = None
-
-        if model_config is None:
-            model_config = getattr(self, "model_config", None)
-
-        super().load_mm_weight(
-            model_config=model_config,
-            ctype=ctype,
-            tp_size=tp_size,
-            tp_rank=tp_rank,
-            device=device,
-        )
-
-        # 再在权重加载完成之后，按设备/配置做后置 patch（仅 ROCm 生效）
-        self._patch_vit_attention_linears()
-
     def _get_hw_kernel_config(self):
         try:
             from rtp_llm.device import get_current_device
@@ -414,4 +323,4 @@ class QWen2_5_VL(QWen2_VL):
             )
 
 
-register_model("qwen2_5_vl", QWen2_5_VL, ["Qwen2_5_VLForConditionalGeneration"])
+register_multimodal_mixin(["qwen2_5_vl"], Qwen2_5_VLMixin)

@@ -6,6 +6,7 @@ from typing import Any, List, Optional, Union
 import torch
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
+from rtp_llm.device.device_base import DeviceBase
 from rtp_llm.ops import VitSeparation
 from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.util import check_with_info
@@ -64,7 +65,7 @@ class LoadConfig(BaseModel):
     use_swizzleA: bool = False
     force_cpu_load_weights: bool = False
 
-    @field_validator("database", "compute_dtype", "quant_algo", "vit_separation")
+    @field_validator("database", "compute_dtype", "quant_algo", "vit_separation", "exported_device")
     @classmethod
     def validate_custom_types(cls, value: Any, info) -> Any:
         field_name = info.field_name

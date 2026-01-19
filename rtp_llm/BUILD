@@ -223,6 +223,7 @@ py_library(
     name = "multimodal",
     srcs = glob([
         "multimodal/*.py",
+        "multimodal/**/*.py",
     ]),
     deps = [
         ":utils",
@@ -333,7 +334,8 @@ py_library(
         "config/**/*.py",
     ]),
     deps = [
-        "//rtp_llm/distribute:distribute"
+        "//rtp_llm/distribute:distribute",
+        ":multimodal"
     ],
     data = [":alog_config"]
 )

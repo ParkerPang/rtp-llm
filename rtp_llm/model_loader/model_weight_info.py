@@ -19,7 +19,7 @@ from rtp_llm.model_loader.weight_module import (
     CompositeWeight,
     WeightModule,
 )
-from rtp_llm.ops import KvCacheDataType, VitSeparation
+from rtp_llm.ops import KvCacheDataType
 from rtp_llm.utils.ckpt_file_info import CkptFileInfo
 from rtp_llm.utils.database import BaseDatabase, CkptDatabase
 from rtp_llm.utils.model_weight import (
@@ -158,7 +158,6 @@ class ModelDeployWeightInfo:
         hw_kernel_config: "HWKernelConfig",
         kv_cache_config: "KVCacheConfig",
         merge_lora: bool = False,
-        vit_config: Optional["VitConfig"] = None,
         **kwargs,
     ):
         """Initialize ModelDeployWeightInfo with independent configuration objects."""
@@ -588,6 +587,7 @@ class ModelDeployWeightInfo:
             and database.ft_weight_params
             and not self._only_load_mm_weights
         ):
+            # check ft_style ParallelInfo is match weight's ParallelInfo
             src_tp_size = int(database.ft_weight_params.get("TP_SIZE", self.tp_size))
             src_dp_size = int(database.ft_weight_params.get("DP_SIZE", self.dp_size))
             src_ep_size = int(database.ft_weight_params.get("EP_SIZE", self.ep_size))
@@ -628,7 +628,6 @@ class ModelDeployWeightInfo:
             ffn_tp_rank=self.ffn_tp_rank,
             ffn_tp_size=self.ffn_tp_size,
             merge_lora=merge_lora,
-            vit_separation=self.vit_separation,
             compute_dtype=compute_dtype,
             quant_algo=self._quant_algo,
             bit=self._quant_algo.getWeightBits(),
