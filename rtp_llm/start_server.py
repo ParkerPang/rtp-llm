@@ -183,19 +183,38 @@ def start_frontend_server_impl(
     return frontend_processes
 
 
-def start_prompt_generator_impl(py_env_configs):
+def start_prompt_generator_impl(py_env_configs, process_manager=None):
     from internal_source.prompt_generator.service.start_server import (
         start_prompt_generator,
     )
 
-    processor = multiprocessing.Process(
-        target=start_prompt_generator,
-        args=(py_env_configs),
-        name="prompt_generator",
-    )
-    processor.start()
-    time.sleep(5)
-    return processor
+    frontend_server_count = py_env_configs.server_config.frontend_server_count
+    assert frontend_server_count >= 1
+
+    prompt_processes = []
+    for i in range(frontend_server_count):
+        process = multiprocessing.Process(
+            target=start_prompt_generator,
+            args=(py_env_configs, i),
+            name=f"prompt_generator_{i}",
+        )
+
+        prompt_processes.append(process)
+        process.start()
+
+    if process_manager and prompt_processes:
+        # Register health check with ProcessManager for the first frontend server
+        def check_frontend_ready():
+            return check_server_health(g_worker_info.http_port)
+
+        process_manager.register_health_check(
+            processes=prompt_processes,
+            process_name="prompt_generator_server",
+            check_ready_fn=check_frontend_ready,
+            retry_interval_seconds=1,
+        )
+
+    return prompt_processes
 
 
 def main():
@@ -243,8 +262,10 @@ def start_server(py_env_configs: PyEnvConfigs):
         process_manager.add_processes(frontend_process)
 
         logging.info("starting prompt generator server...")
-        prompt_generator_process = start_prompt_generator_impl(py_env_configs)
-        process_manager.add_process(prompt_generator_process)
+        prompt_generator_processes = start_prompt_generator_impl(
+            py_env_configs, process_manager
+        )
+        process_manager.add_process(prompt_generator_processes)
 
         # Start parallel health checks and wait for completion
         if not process_manager.run_health_checks():
