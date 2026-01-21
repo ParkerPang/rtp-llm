@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 
 import torch
 
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.config.quant_config import (
     Fp8BlockWiseQuantConfig,
     W4a8Int4PerChannelQuantConfig,
@@ -13,6 +14,7 @@ from rtp_llm.config.quant_config import (
     init_quant_config,
 )
 from rtp_llm.multimodal.multimodal_mixin_register import get_multimodal_mixin_cls
+from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import VitParameters
 from rtp_llm.ops import DataType, KVCacheConfig, KvCacheDataType
 from rtp_llm.ops import ModelConfig as CppModelConfig
 from rtp_llm.ops import TaskType
@@ -40,7 +42,6 @@ def kv_cache_dtype_to_torch_dtype(
     else:  # BASE
         return data_type.to_torch_dtype()
 
-
 def ssm_state_dtype_str_to_data_type(ssm_state_dtype: str) -> DataType:
     ssm_state_dtype = ssm_state_dtype.lower()
     if ssm_state_dtype == "bf16":
@@ -50,20 +51,6 @@ def ssm_state_dtype_str_to_data_type(ssm_state_dtype: str) -> DataType:
     if ssm_state_dtype == "fp32":
         return DataType.TYPE_FP32
     raise ValueError(f"Unsupported ssm_state_dtype: {ssm_state_dtype}")
-
-
-class VitParameters:
-    """Vit parameters for multimodal models."""
-
-    # config includes origin vit config in ckpt/config.json
-    config: Dict[str, Any] = {}
-    special_token_ids: Dict[str, Any] = {}
-    special_tokens: Dict[str, Any] = {}
-    vit_weights: Any = None
-    preprocess_batch_size: int = 1
-    eval_param_count = None
-    eval_model_size = None
-
 
 class ModelConfig(CppModelConfig):
     # Python-only fields that are allowed to be set
@@ -231,7 +218,7 @@ class ModelConfig(CppModelConfig):
 
         if self.mm_model_config.is_multimodal:
             model_size += get_multimodal_mixin_cls(self.model_type).eval_mm_model_size(
-                self
+                self.mm_related_params, self.extra_data_path, self.local_extra_data_path
             )
 
         return model_size
@@ -327,7 +314,9 @@ class ModelConfig(CppModelConfig):
         if self.mm_model_config.is_multimodal:
             param_count += get_multimodal_mixin_cls(
                 self.model_type
-            ).eval_mm_model_param_count(self)
+            ).eval_mm_model_param_count(
+                self.mm_related_params, self.extra_data_path, self.local_extra_data_path
+            )
         return param_count
 
     def word_emb_param_count(self, vocab_size: int) -> int:
@@ -793,6 +782,7 @@ def build_model_config(
     quantization_config: Optional[
         Any
     ] = None,  # QuantizationConfig (optional, for quantization)
+    vit_config: Optional[VitConfig] = None,
 ) -> None:
     """Build and initialize ModelConfig from model_args.
 
@@ -809,9 +799,9 @@ def build_model_config(
     """
     model_config.ckpt_path = model_args.ckpt_path
     model_config.tokenizer_path = model_args.tokenizer_path
-    model_config.extra_data_path = model_args.extra_data_path
-    model_config.local_extra_data_path = model_args.local_extra_data_path
     model_config.model_type = model_args.model_type
+    model_config.extra_data_path = vit_config.extra_data_path
+    model_config.local_extra_data_path = vit_config.local_extra_data_path
     model_config.phy2log_path = model_args.phy2log_path
 
     if model_args.mla_ops_type:

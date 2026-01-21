@@ -232,7 +232,6 @@ py_library(
         ":pillow-avif-plugin",
         ":nest_asyncio",
         ":matplotlib",
-        ":av",
         ":torchvision",
     ] + select({
         "@//:using_arm": [],

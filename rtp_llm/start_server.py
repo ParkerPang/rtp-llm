@@ -251,6 +251,19 @@ def start_server(py_env_configs: PyEnvConfigs):
     )
     # Initialize backend_process to None in case role_type is FRONTEND
     backend_process = None
+    # Get number of nodes
+    try:
+        world_info = get_world_info(
+            py_env_configs.server_config, py_env_configs.distribute_config
+        )
+        num_nodes = world_info.num_nodes
+    except Exception:
+        # If get_world_info fails, estimate from world_size
+        # Assuming 8 GPUs per node
+        num_nodes = (g_parallel_info.world_size + 7) // 8
+        logging.info(
+            f"Failed to get world_info, estimated num_nodes={num_nodes} from world_size={g_parallel_info.world_size}"
+        )
 
     try:
         if (

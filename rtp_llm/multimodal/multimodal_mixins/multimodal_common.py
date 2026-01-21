@@ -73,11 +73,9 @@ class ImageTransform:
 
 
 class MultiModalEmbeddingInterface:
-    data_type: torch.dtype = torch.float16
-
     @property
     def _data_type(self):
-        return self.data_type
+        raise NotImplementedError
 
     @property
     def _device(self):
