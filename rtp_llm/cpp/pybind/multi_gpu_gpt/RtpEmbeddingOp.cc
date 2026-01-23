@@ -91,7 +91,6 @@ void RtpEmbeddingOp::init(py::object model,
         bool       need_post_process = py_handler.attr("need_post_process").cast<bool>();
 
         if (parallelism_config.tp_rank == 0) {
-
             // kmon metric init
             (void)initKmonitorFactory();
             auto kmon_tags = kmonitor::MetricsTags();
@@ -102,6 +101,9 @@ void RtpEmbeddingOp::init(py::object model,
         if (!mm_process_engine.is_none()) {
             mm_processor_.reset(new LocalMultimodalProcessor(
                 mm_process_engine, params.model_config_.mm_model_config, params.model_config_.max_seq_len));
+        } else {
+            mm_processor_.reset(
+                new RemoteMultimodalProcessor(params.model_config_.mm_model_config, params.model_config_.max_seq_len));
         }
 
         int64_t model_rpc_port     = params.server_config.attr("rpc_server_port").cast<int64_t>();

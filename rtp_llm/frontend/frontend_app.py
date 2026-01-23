@@ -232,26 +232,6 @@ class FrontendApp(object):
                     status_code=400,
                     content={"error": f" HTTP health check failed"},
                 )
-            if self.vit_http_server_port:
-                try:
-                    vit_response = requests.get(
-                        f"http://localhost:{self.vit_http_server_port}/health",
-                        timeout=10,
-                    )
-                    if (
-                        vit_response.status_code != 200
-                        or vit_response.text.strip() != '"ok"'
-                    ):
-                        return ORJSONResponse(
-                            status_code=400,
-                            content={"error": f"VIT health check failed"},
-                        )
-                except BaseException as e:
-                    logging.debug(f"VIT health check failed: {e}")
-                    return ORJSONResponse(
-                        status_code=400,
-                        content={"error": f"VIT health check failed: {e}"},
-                    )
 
             return "ok"
 
