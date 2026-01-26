@@ -233,6 +233,8 @@ py_library(
         ":nest_asyncio",
         ":matplotlib",
         ":torchvision",
+        ":protobuf",
+        ":pyOpenSSL",
     ] + select({
         "@//:using_arm": [],
 	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
@@ -257,7 +259,6 @@ py_library(
         ":tiktoken",
         ":protobuf",
         ":torch",
-        ":pyOpenSSL",
         ":einops",
         ":utils",
         ":ops",
