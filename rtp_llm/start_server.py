@@ -183,13 +183,15 @@ def start_frontend_server_impl(
     return frontend_processes
 
 
-def start_prompt_generator_impl(py_env_configs, process_manager=None):
-    from internal_source.prompt_generator.service.start_server import (
+def start_prompt_generator_impl(py_env_configs: PyEnvConfigs, process_manager=None):
+    from internal_source.rtp_llm.prompt_generator.service.start_server import (
         start_prompt_generator,
     )
 
     pg_server_count = int(os.environ.get("PROMPT_GENERATOR_SERVER_COUNT", "1"))
-    assert pg_server_count >= 1
+    assert (
+        pg_server_count >= 1
+    ), "prompt generator server count must be greater than 0, but got {pg_server_count}"
 
     prompt_processes = []
     for i in range(pg_server_count):
@@ -205,7 +207,7 @@ def start_prompt_generator_impl(py_env_configs, process_manager=None):
     if process_manager and prompt_processes:
         # Register health check with ProcessManager for the first frontend server
         def check_frontend_ready():
-            return check_server_health(g_worker_info.http_port)
+            return check_server_health(py_env_configs.server_config.http_port)
 
         process_manager.register_health_check(
             processes=prompt_processes,
