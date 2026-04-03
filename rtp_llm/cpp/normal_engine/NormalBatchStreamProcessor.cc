@@ -193,8 +193,8 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     int                        mm_feature_index   = 0;
 
     // extra input embeddings
-    std::vector<rtp_llm::BufferPtr> gathered_input_embeddings;
-    std::vector<int>                gathered_input_embedding_locs;
+    std::vector<torch::Tensor> gathered_input_embeddings;
+    std::vector<int>           gathered_input_embedding_locs;
 
     for (const auto& stream : context_streams) {
         // context stream也需要batch运行是为了perf test的场景
@@ -261,8 +261,11 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
 
                 // 收集 embeddings
                 for (const auto& embedding : embeddings) {
-                    auto embedding_buffer = torchTensor2Buffer(embedding);
-                    gathered_input_embeddings.emplace_back(device_->clone({*embedding_buffer}));
+                    if (embedding.is_cuda()) {
+                        gathered_input_embeddings.emplace_back(embedding);
+                    } else {
+                        gathered_input_embeddings.emplace_back(embedding.to(torch::kCUDA));
+                    }
                 }
 
                 // 收集并调整位置信息
@@ -326,9 +329,11 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     }
 
     if (!gathered_input_embeddings.empty()) {
-        model_input.input_embeddings = std::move(gathered_input_embeddings);
-        model_input.input_embeddings_locs =
-            device_->clone({*vector2Buffer(gathered_input_embedding_locs), rtp_llm::AllocationType::HOST});
+        model_input.input_embeddings      = std::move(gathered_input_embeddings);
+        model_input.input_embeddings_locs = torch::from_blob(gathered_input_embedding_locs.data(),
+                                                             {(int64_t)gathered_input_embedding_locs.size()},
+                                                             torch::kInt32)
+                                                .clone();
     }
 
     return model_input;
@@ -367,7 +372,8 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
             memcpy(sampler_inputs.token_ids.data_ptr<int32_t>() + ((batch_idx) * (sampler_inputs.step + 1)),
                    complete_token_ids.data_ptr<int32_t>() + cur_batch * complete_seq_len,
                    seq_len * sizeof(int));
-            reinterpret_cast<bool*>(sampler_inputs.finished_mask.data_ptr())[batch_idx] = stream->isDoneWithoutLock(cur_batch);
+            reinterpret_cast<bool*>(sampler_inputs.finished_mask.data_ptr())[batch_idx] =
+                stream->isDoneWithoutLock(cur_batch);
             batch_idx += 1;
         }
         need_tiling |= stream->needTilingForSampling();
