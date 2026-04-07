@@ -90,8 +90,10 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
-    logits_processor_list_ = LogitsProcessorFactory::createLogitsProcessors(
-        generate_input_, logits_processor_init_batch_size, logits_processor_init_batch_size, special_tokens_.eos_token_id);
+    logits_processor_list_ = LogitsProcessorFactory::createLogitsProcessors(generate_input_,
+                                                                            logits_processor_init_batch_size,
+                                                                            logits_processor_init_batch_size,
+                                                                            special_tokens_.eos_token_id);
 
     if (generateConfig()->random_seed.has_value()) {
 #if defined(USING_CUDA) || defined(USING_ROCM)
@@ -476,6 +478,9 @@ int64_t GenerateStream::getTimeoutMs() const {
 }
 
 void GenerateStream::checkTimeout() {
+    if (finished() || stopped()) {
+        return;
+    }
     auto running_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
     auto timeout_ms      = getTimeoutMs();
     if (timeout_ms > 0 && timeout_ms < running_time_ms) {
