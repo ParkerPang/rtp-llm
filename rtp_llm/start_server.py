@@ -230,14 +230,14 @@ def start_prompt_generator_impl(
                 )
 
     if process_manager and prompt_processes:
-        # Register health check with ProcessManager for the first frontend server
-        def check_frontend_ready():
+
+        def check_prompt_generator_ready():
             return check_server_health(py_env_configs.server_config.start_port)
 
         process_manager.register_health_check(
             processes=prompt_processes,
             process_name="prompt_generator_server",
-            check_ready_fn=check_frontend_ready,
+            check_ready_fn=check_prompt_generator_ready,
             retry_interval_seconds=1,
         )
 
@@ -275,6 +275,7 @@ def start_server(py_env_configs: PyEnvConfigs):
     enable_mps = os.environ.get("ENABLE_MPS", "") == "true"
     if enable_mps:
         from internal_source.rtp_llm.prompt_generator.service.start_mps import start_mps
+
         start_mps()
 
     # Initialize backend_process to None in case role_type is FRONTEND
@@ -293,7 +294,7 @@ def start_server(py_env_configs: PyEnvConfigs):
         )
 
         if enable_prompt_generator:
-            logging.info("startting prompt generator server...")
+            logging.info("starting prompt generator server...")
             prompt_generator_processes = start_prompt_generator_impl(
                 global_controller, py_env_configs, process_manager
             )
