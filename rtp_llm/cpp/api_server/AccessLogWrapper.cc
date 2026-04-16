@@ -109,7 +109,7 @@ private:
     std::string     log_time_;
 };
 
-bool AccessLogWrapper::default_private_request = false;
+std::atomic<bool> AccessLogWrapper::default_private_request{false};
 
 void AccessLogWrapper::logQueryAccess(const std::string&  raw_request,
                                       int64_t             request_id,

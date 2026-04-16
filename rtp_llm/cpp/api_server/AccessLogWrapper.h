@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <optional>
 
 #include "autil/legacy/json.h"
@@ -24,7 +25,7 @@ public:
 
     static void logExceptionAccess(const std::string& raw_request, int64_t request_id, const std::string& exception);
 
-    static bool default_private_request;
+    static std::atomic<bool> default_private_request;
 };
 
 }  // namespace rtp_llm
