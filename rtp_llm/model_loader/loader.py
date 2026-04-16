@@ -96,7 +96,7 @@ class ModelLoader:
 
     @timer_wrapper(description="load embedding weights")
     @torch.inference_mode()
-    def load_embedding_weight(self, device: str) -> Dict[str, torch.Tensor]:
+    def load_embedding_weight(self, device: str) -> Optional[Dict[str, torch.Tensor]]:
         for weight in self._model_weights_info.weights:
             if weight.name == W.embedding:
                 tensors = weight.load(
