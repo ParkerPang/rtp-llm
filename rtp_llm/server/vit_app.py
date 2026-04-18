@@ -1,10 +1,12 @@
 import asyncio
+import base64
 import logging
 import socket
 import threading
 from typing import Any, Dict, List, Optional, Union
 
-from fastapi import FastAPI, HTTPException
+import torch
+from fastapi import Body, FastAPI, HTTPException
 from fastapi import Request as RawRequest
 from fastapi import status
 from fastapi.middleware import Middleware
@@ -25,7 +27,16 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.ops import RoleType
-from rtp_llm.server.vit_rpc_server import MultimodalRpcServer, create_rpc_server
+from rtp_llm.server.vit_rpc_server import (
+    MultimodalRpcServer,
+    create_rpc_server,
+    trans_output,
+)
+from rtp_llm.utils.base_model_datatypes import (
+    MMPreprocessConfig,
+    MMUrlType,
+    MultimodalInput,
+)
 
 
 class GracefulShutdownServer(Server):
@@ -156,6 +167,36 @@ class VitEndpointApp:
         async def worker_status():
             return self.vit_endpoint_server.worker_status()
 
+        @app.post("/v1/multimodal/embedding")
+        async def multimodal_embedding(request: Dict[str, Any]):
+            """
+            HTTP 推理接口：接收图片并返回 multimodal embedding。
+
+            请求格式:
+            {
+                "images": [
+                    {"url": "data:image/jpeg;base64,..."},
+                    {"url": "https://example.com/image.jpg"},
+                    {"base64": "/9j/4AAQ..."}
+                ],
+                "config": {  // 可选
+                    "min_pixels": 200704,
+                    "max_pixels": 1003520
+                }
+            }
+            """
+            import traceback
+
+            try:
+                result = self.vit_endpoint_server.multimodal_embedding_http(request)
+                return result
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            except Exception as e:
+                error_detail = traceback.format_exc()
+                logging.error(f"Multimodal embedding error: {e}\n{error_detail}")
+                raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
         return app
 
 
@@ -199,3 +240,87 @@ class VitEndpointServer:
 
     def worker_status(self):
         return {}
+
+    def multimodal_embedding_http(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        处理 HTTP 推理请求，返回 multimodal embedding 结果。
+
+        请求格式:
+        {
+            "images": [
+                {"url": "data:image/jpeg;base64,..."},
+                {"url": "https://example.com/image.jpg"},
+                {"base64": "/9j/4AAQ..."}
+            ],
+            "config": {  // 可选
+                "min_pixels": 200704,
+                "max_pixels": 1003520
+            }
+        }
+        """
+        if self.mm_process_engine is None:
+            raise ValueError("Multimodal process engine is not initialized")
+
+        images = request.get("images", [])
+        if not images:
+            raise ValueError("No images provided in request")
+
+        config_dict = request.get("config", {})
+        preprocess_config = MMPreprocessConfig(
+            width=config_dict.get("width", 0),
+            height=config_dict.get("height", 0),
+            min_pixels=config_dict.get("min_pixels", 256 * 28 * 28),
+            max_pixels=config_dict.get("max_pixels", 1280 * 28 * 28),
+            fps=config_dict.get("fps", 2),
+            min_frames=config_dict.get("min_frames", 4),
+            max_frames=config_dict.get("max_frames", 768),
+        )
+
+        mm_inputs = []
+        for image_item in images:
+            if isinstance(image_item, str):
+                if image_item.startswith(("http", "data:")):
+                    url = image_item
+                elif image_item.startswith("base64:"):
+                    # "base64:image/jpeg;base64,..." → "data:image/jpeg;base64,..."
+                    url = "data:" + image_item[len("base64:") :]
+                else:
+                    url = f"data:image/jpeg;base64,{image_item}"
+            elif isinstance(image_item, dict):
+                if "url" in image_item:
+                    url = image_item["url"]
+                elif "base64" in image_item:
+                    url = f"data:image/jpeg;base64,{image_item['base64']}"
+                else:
+                    raise ValueError(
+                        f"Image item must contain 'url' or 'base64' key, got: {list(image_item.keys())}"
+                    )
+            else:
+                raise ValueError(f"Unsupported image item type: {type(image_item)}")
+
+            mm_inputs.append(
+                MultimodalInput(
+                    url=url,
+                    mm_type=MMUrlType.IMAGE,
+                    tensor=torch.empty(0),
+                    config=preprocess_config,
+                )
+            )
+
+        res = self.mm_process_engine.mm_embedding_impl(mm_inputs)
+
+        result = {
+            "split_size": [e.shape[0] for e in res.embeddings],
+        }
+        if res.embeddings:
+            embedding_tensor = torch.concat(res.embeddings)
+            result["embedding_shape"] = list(embedding_tensor.shape)
+            result["embedding_dtype"] = str(embedding_tensor.dtype)
+            result["embedding_base64"] = base64.b64encode(
+                embedding_tensor.cpu().to(torch.float16).numpy().tobytes()
+            ).decode("utf-8")
+        if res.position_ids and len(res.position_ids) > 0:
+            pos_tensor = torch.concat(res.position_ids)
+            result["position_ids_shape"] = list(pos_tensor.shape)
+
+        return result
