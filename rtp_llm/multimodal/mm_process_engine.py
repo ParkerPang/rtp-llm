@@ -5,9 +5,10 @@ import multiprocessing.pool
 import os
 import signal
 import time
-from multiprocessing import Lock
+from multiprocessing import Lock, shared_memory
 from typing import Any, Callable, List, Optional, Tuple
 
+import numpy as np
 import torch
 
 from rtp_llm.access_logger.access_logger import MMAccessLogger
@@ -39,6 +40,73 @@ _worker_preprocess_params: Optional[dict] = None
 _worker_preprocess_func: Optional[Callable] = None
 
 
+def _tensor_to_shm(tensor: torch.Tensor) -> Tuple[str, tuple, str]:
+    """将 tensor 写入共享内存，返回 (shm_name, shape, dtype_str)"""
+    arr = tensor.numpy()
+    shm = shared_memory.SharedMemory(create=True, size=arr.nbytes)
+    shm_arr = np.ndarray(arr.shape, dtype=arr.dtype, buffer=shm.buf)
+    shm_arr[:] = arr[:]
+    result = (shm.name, arr.shape, str(arr.dtype))
+    shm.close()
+    return result
+
+
+def _shm_to_tensor(shm_name: str, shape: tuple, dtype_str: str) -> torch.Tensor:
+    """从共享内存重建 tensor，零拷贝直接引用 shm buffer。
+    调用方需要在 tensor 使用完毕后调用 tensor._shm_handle.close() 和 .unlink() 释放。
+    """
+    shm = shared_memory.SharedMemory(name=shm_name)
+    arr = np.ndarray(shape, dtype=np.dtype(dtype_str), buffer=shm.buf)
+    tensor = torch.from_numpy(arr)  # 零拷贝，直接引用 shm buffer
+    tensor._shm_handle = shm  # 防止 GC 回收 shm，保持 buffer 有效
+    return tensor
+
+
+def _result_to_shm(result: Any) -> Any:
+    """将预处理结果中的 tensor 转为共享内存引用"""
+    if isinstance(result, tuple):
+        return tuple(
+            _tensor_to_shm(t) if isinstance(t, torch.Tensor) else t for t in result
+        )
+    if isinstance(result, torch.Tensor):
+        return _tensor_to_shm(result)
+    return result
+
+
+def _result_from_shm(shm_result: Any) -> Any:
+    """从共享内存引用重建预处理结果中的 tensor"""
+    if isinstance(shm_result, tuple) and len(shm_result) > 0:
+        # 判断是否是 shm 元数据 (name, shape, dtype_str)
+        if (
+            len(shm_result) == 3
+            and isinstance(shm_result[0], str)
+            and isinstance(shm_result[1], tuple)
+        ):
+            return _shm_to_tensor(*shm_result)
+        # 否则是 tuple of (可能是 shm 元数据)
+        return tuple(_result_from_shm(item) for item in shm_result)
+    return shm_result
+
+
+def _release_shm_tensor(tensor: Any) -> None:
+    """释放 tensor 引用的共享内存"""
+    if isinstance(tensor, torch.Tensor) and hasattr(tensor, "_shm_handle"):
+        try:
+            tensor._shm_handle.close()
+            tensor._shm_handle.unlink()
+        except Exception:
+            pass
+
+
+def _release_preprocess_result(result: Any) -> None:
+    """释放预处理结果中所有 tensor 的共享内存"""
+    if isinstance(result, tuple):
+        for item in result:
+            _release_shm_tensor(item)
+    elif isinstance(result, torch.Tensor):
+        _release_shm_tensor(result)
+
+
 def _worker_initializer(
     vit_config: VitConfig,
     preprocess_params: dict,
@@ -62,16 +130,17 @@ def _worker_process_task(
 ) -> Tuple[Any, float]:
     """
     只接收变化的 `mm_inputs` 参数。
+    结果中的 tensor 通过共享内存传回，pipe 只传元数据。
     """
     if _worker_preprocess_func is None:
         raise RuntimeError("Worker process has not been initialized correctly.")
 
     with Timer() as route_timer:
-        # 3. 使用来自全局变量的不变参数
         result = _worker_preprocess_func(
             mm_inputs, _worker_vit_config, **_worker_preprocess_params
         )
-    return result, route_timer.cost_ms()
+    shm_result = _result_to_shm(result)
+    return shm_result, route_timer.cost_ms()
 
 
 class PreprocessExecutor:
@@ -198,9 +267,10 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             return
 
         try:
-            work_item.preprocess_result, preprocess_time = work_item.future.get(
+            shm_result, preprocess_time = work_item.future.get(
                 timeout=work_item.mm_timeout_ms / 1000.0
             )
+            work_item.preprocess_result = _result_from_shm(shm_result)
             kmonitor.report(GaugeMetrics.VIT_PREPROCESS_RT_METRIC, preprocess_time)
         except multiprocessing.pool.TimeoutError:
             raise TimeoutError(
@@ -529,6 +599,11 @@ class MMProcessEngine:
                         [wi.mm_type for _, wi in pending_items],
                     )
             kmonitor.report(GaugeMetrics.VIT_EMBEDDING_RT_METRIC, route_timer.cost_ms())
+
+            # Release shm after embedding is done — tensors are no longer needed
+            for _, wi in pending_items:
+                _release_preprocess_result(wi.preprocess_result)
+                wi.preprocess_result = None
 
             if batch_outputs is not None:
                 for (idx, work_item), result in zip(pending_items, batch_outputs):
