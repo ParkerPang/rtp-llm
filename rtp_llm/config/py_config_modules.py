@@ -181,6 +181,7 @@ class VitConfig:
         self.disable_access_log: bool = False
         self.use_local_preprocess: bool = False
         self.vit_proxy_load_balance_strategy: str = "round_robin"
+        self.gen_vit_timeline_sync: bool = False
 
     def to_string(self):
         return (

@@ -2,6 +2,7 @@ import logging
 import os
 
 from rtp_llm.ops import VitSeparation
+from rtp_llm.server.server_args.util import str2bool
 
 
 def _convert_vit_separation(value):
@@ -219,4 +220,12 @@ def init_vit_group_args(parser, vit_config):
         type=str,
         default="round_robin",
         help="VIT代理服务器的负载均衡策略，可选值: 'round_robin' 或 'least_connections'",
+    )
+    vit_group.add_argument(
+        "--gen_vit_timeline_sync",
+        env_name="GEN_VIT_TIMELINE_SYNC",
+        bind_to=(vit_config, "gen_vit_timeline_sync"),
+        type=str2bool,
+        default=False,
+        help="是否开启VIT Server的Timeline采集用于性能分析",
     )

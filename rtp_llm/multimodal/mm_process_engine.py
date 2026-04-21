@@ -3,13 +3,16 @@ import gc
 import logging
 import multiprocessing.pool
 import os
+import queue
 import signal
+import threading
 import time
 from multiprocessing import Lock, shared_memory
 from typing import Any, Callable, List, Optional, Tuple
 
 import numpy as np
 import torch
+import torch.autograd.profiler as tap
 
 from rtp_llm.access_logger.access_logger import MMAccessLogger
 from rtp_llm.config.log_config import get_log_path
@@ -343,6 +346,175 @@ class _LocalResult:
         return (self.result, self.time)
 
 
+class _ProfilerSaveWorker:
+    """后台线程异步保存 profiler trace，避免阻塞推理。
+    借鉴 main 分支 ProfilerSaveWorker 设计。
+    """
+
+    def __init__(self):
+        self._queue: queue.Queue = queue.Queue()
+        self._stop = False
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def enqueue(self, result: Any, file_name: str) -> None:
+        self._queue.put((result, file_name))
+
+    def _run(self):
+        while True:
+            try:
+                item = self._queue.get(timeout=1.0)
+            except queue.Empty:
+                if self._stop:
+                    return
+                continue
+            result, file_name = item
+            try:
+                logging.info(f"VitProfiler: saving trace to {file_name} (async)")
+                result.save(file_name)
+                logging.info(f"VitProfiler: trace saved: {file_name}")
+            except Exception as e:
+                logging.error(f"VitProfiler: failed to save trace {file_name}: {e}")
+
+    def shutdown(self):
+        self._stop = True
+        self._thread.join(timeout=10.0)
+
+
+class VitProfiler:
+    """VIT Server 的 profiler，借鉴 main 分支 StepWindowProfiler 设计。
+
+    使用 PyTorch Kineto profiler 采集 CPU + CUDA activity。
+    全局配置开启（gen_vit_timeline_sync），跳过 warmup 后连续采集多次 forward，
+    合并到一个 trace 文件中异步保存。
+
+    使用方式：
+        GEN_TIMELINE_SYNC=1 启动服务即可。
+    """
+
+    def __init__(
+        self,
+        enabled: bool = False,
+        output_dir: str = ".",
+        server_id: int = 0,
+        warmup_steps: int = 2,
+        num_steps: int = 5,
+    ):
+        self._enabled = enabled
+        self._output_dir = output_dir
+        self._server_id = server_id
+        self._warmup_steps = warmup_steps
+        self._num_steps = num_steps  # 一个 session 采集多少次 forward
+        self._step_count = 0
+        self._profiled_steps = 0
+        self._profiling_active = False
+        self._session_count = 0
+        self._save_worker = _ProfilerSaveWorker() if enabled else None
+
+        # Kineto profiler config (与 main 分支 TorchProfile 对齐)
+        self._config = tap.ProfilerConfig(
+            state=tap.ProfilerState.KINETO,
+            report_input_shapes=True,
+            profile_memory=False,
+            with_stack=True,
+            with_flops=False,
+            with_modules=False,
+            experimental_config=tap._ExperimentalConfig(),
+        )
+        self._activities = {tap.ProfilerActivity.CPU, tap.ProfilerActivity.CUDA}
+
+        if enabled:
+            logging.info(
+                f"VitProfiler: enabled (output_dir={output_dir}, "
+                f"server_id={server_id}, warmup_steps={warmup_steps}, "
+                f"num_steps={num_steps})"
+            )
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def profile_embedding(self, fn: Callable, *args, **kwargs) -> Any:
+        """包裹 embedding forward，按 session 采集 timeline。
+
+        流程：
+        1. 前 warmup_steps 次：直接执行，不采集
+        2. 第 warmup_steps+1 次：启动 profiler
+        3. 连续采集 num_steps 次 forward
+        4. 第 warmup_steps+num_steps 次后：停止 profiler，异步保存一个文件
+        5. 之后不再采集（单次 session）
+        """
+        if not self._enabled:
+            return fn(*args, **kwargs)
+
+        self._step_count += 1
+
+        # Phase 1: warmup — 直接执行
+        if self._step_count <= self._warmup_steps:
+            logging.debug(
+                f"VitProfiler: warmup step {self._step_count}/{self._warmup_steps}"
+            )
+            return fn(*args, **kwargs)
+
+        # Phase 2: 启动 profiler（仅在 warmup 结束后的第一次）
+        if not self._profiling_active:
+            self._session_count += 1
+            logging.info(
+                f"VitProfiler: starting profiling session {self._session_count} "
+                f"(will collect {self._num_steps} steps)"
+            )
+            tap._prepare_profiler(self._config, self._activities)
+            tap._enable_profiler(self._config, self._activities)
+            self._profiling_active = True
+            self._profiled_steps = 0
+
+        # Phase 3: 执行 forward（profiler 正在采集）
+        result = fn(*args, **kwargs)
+        self._profiled_steps += 1
+
+        # Phase 4: 达到 num_steps，停止 profiler 并保存
+        if self._profiled_steps >= self._num_steps:
+            prof_result = tap._disable_profiler()
+            self._profiling_active = False
+
+            file_name = (
+                f"{self._output_dir}/vit_profiler_s{self._server_id}"
+                f"_n{self._num_steps}"
+                f"_{self._session_count}.json"
+            )
+            self._save_worker.enqueue(prof_result, file_name)
+            logging.info(
+                f"VitProfiler: session {self._session_count} done, "
+                f"collected {self._profiled_steps} steps, saving to {file_name}"
+            )
+
+            # 单次 session 后关闭
+            self._enabled = False
+
+        return result
+
+    def shutdown(self):
+        # 如果 profiler 还在运行（未达到 num_steps 就 shutdown），也要保存
+        if self._profiling_active:
+            try:
+                prof_result = tap._disable_profiler()
+                self._profiling_active = False
+                file_name = (
+                    f"{self._output_dir}/vit_profiler_s{self._server_id}"
+                    f"_n{self._profiled_steps}"
+                    f"_{self._session_count}_partial.json"
+                )
+                if self._save_worker:
+                    self._save_worker.enqueue(prof_result, file_name)
+                    logging.info(
+                        f"VitProfiler: partial session saved ({self._profiled_steps} steps)"
+                    )
+            except Exception as e:
+                logging.error(f"VitProfiler: error during shutdown: {e}")
+        if self._save_worker:
+            self._save_worker.shutdown()
+
+
 class MMEmbeddingRes:
     """Result container for multimodal embedding operations."""
 
@@ -427,6 +599,13 @@ class MMProcessEngine:
         self.mp_context = multiprocessing.get_context("spawn")
 
         self.mm_part = mm_part
+
+        # 创建 VIT profiler
+        self._vit_profiler = VitProfiler(
+            enabled=vit_config.gen_vit_timeline_sync,
+            output_dir=profiling_debug_logging_config.torch_cuda_profiler_dir or ".",
+            server_id=server_id,
+        )
 
         # 根据 vit_config 创建预处理执行器
         preprocess_params = self.mm_part.get_preprocess_params()
@@ -520,10 +699,12 @@ class MMProcessEngine:
                 self._access_logger.log_query_access(mm_inputs)
 
             work_items = self._create_work_items(mm_inputs)
-            self._wait_for_preprocessing(work_items)
-            emb_res, pos_res, deepstack_embeds_res = self._compute_embeddings(
-                work_items
-            )
+            with torch.profiler.record_function("vit::preprocess_wait"):
+                self._wait_for_preprocessing(work_items)
+            with torch.profiler.record_function("vit::compute_embeddings"):
+                emb_res, pos_res, deepstack_embeds_res = self._compute_embeddings(
+                    work_items
+                )
 
             result = MMEmbeddingRes(emb_res, pos_res, deepstack_embeds_res)
             if not self.vit_config.disable_access_log:
@@ -592,11 +773,14 @@ class MMProcessEngine:
 
         if pending_items:
             batch_outputs = None
+            data_list = [wi.preprocess_result for _, wi in pending_items]
+            type_list = [wi.mm_type for _, wi in pending_items]
             with Timer() as route_timer:
                 with mm_embedding_lock:
-                    batch_outputs = self.mm_part.batched_embedding(
-                        [wi.preprocess_result for _, wi in pending_items],
-                        [wi.mm_type for _, wi in pending_items],
+                    batch_outputs = self._vit_profiler.profile_embedding(
+                        self.mm_part.batched_embedding,
+                        data_list,
+                        type_list,
                     )
             kmonitor.report(GaugeMetrics.VIT_EMBEDDING_RT_METRIC, route_timer.cost_ms())
 
@@ -622,5 +806,6 @@ class MMProcessEngine:
         return emb_res, pos_res, tensor_res
 
     def stop(self) -> None:
-        """Shutdown the preprocessing executor."""
+        """Shutdown the preprocessing executor and profiler."""
+        self._vit_profiler.shutdown()
         self.preprocess_executor.shutdown()

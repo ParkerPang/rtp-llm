@@ -154,19 +154,28 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         for data, mm_type in zip(data_list, mm_types):
             pixel_values_list.append(data[0])
             grid_thw_list.append(data[1])
-        pixel_values = (
-            torch.concat(pixel_values_list, dim=0).to(self._device).to(self._data_type)
-        )
-        grid_thw = torch.concat(grid_thw_list, dim=0).to(self._device)
-        embeds, deepstack_embeds = self.visual(pixel_values, grid_thw=grid_thw)
-        split_sizes = (grid_thw.prod(-1) // self.visual.spatial_merge_size**2).tolist()
-        embeds = torch.split(embeds, split_sizes)
-        pos_id = self.get_position_ids(grid_thw)
-        deepstack_embeds = (
-            torch.stack(deepstack_embeds).to(self._data_type).split(split_sizes, dim=1)
-        )
-        for e, p, d in zip(embeds, pos_id, deepstack_embeds):
-            res_list.append((e.to(self._data_type), p, d))
+        with torch.profiler.record_function("vit::concat_and_transfer"):
+            pixel_values = (
+                torch.concat(pixel_values_list, dim=0)
+                .to(self._device)
+                .to(self._data_type)
+            )
+            grid_thw = torch.concat(grid_thw_list, dim=0).to(self._device)
+        with torch.profiler.record_function("vit::visual_forward"):
+            embeds, deepstack_embeds = self.visual(pixel_values, grid_thw=grid_thw)
+        with torch.profiler.record_function("vit::post_process"):
+            split_sizes = (
+                grid_thw.prod(-1) // self.visual.spatial_merge_size**2
+            ).tolist()
+            embeds = torch.split(embeds, split_sizes)
+            pos_id = self.get_position_ids(grid_thw)
+            deepstack_embeds = (
+                torch.stack(deepstack_embeds)
+                .to(self._data_type)
+                .split(split_sizes, dim=1)
+            )
+            for e, p, d in zip(embeds, pos_id, deepstack_embeds):
+                res_list.append((e.to(self._data_type), p, d))
         return res_list
 
 
