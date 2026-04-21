@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -14,6 +15,8 @@ from transformers import (
 )
 
 from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.metrics import kmonitor
+from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
 from rtp_llm.multimodal.multimodal_mixin_register import register_multimodal_mixin
 from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
     BaseVitWeights,
@@ -154,6 +157,12 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         for data, mm_type in zip(data_list, mm_types):
             pixel_values_list.append(data[0])
             grid_thw_list.append(data[1])
+
+        # 上报总 pixel 数
+        total_pixels = sum(pv.shape[0] for pv in pixel_values_list)
+        kmonitor.report(GaugeMetrics.VIT_TOTAL_PIXEL_COUNT_METRIC, total_pixels)
+
+        concat_start = time.time()
         with torch.profiler.record_function("vit::concat_and_transfer"):
             pixel_values = (
                 torch.concat(pixel_values_list, dim=0)
@@ -161,8 +170,19 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
                 .to(self._data_type)
             )
             grid_thw = torch.concat(grid_thw_list, dim=0).to(self._device)
+        kmonitor.report(
+            GaugeMetrics.VIT_CONCAT_RT_METRIC, (time.time() - concat_start) * 1000
+        )
+
+        forward_start = time.time()
         with torch.profiler.record_function("vit::visual_forward"):
             embeds, deepstack_embeds = self.visual(pixel_values, grid_thw=grid_thw)
+        kmonitor.report(
+            GaugeMetrics.VIT_VISUAL_FORWARD_RT_METRIC,
+            (time.time() - forward_start) * 1000,
+        )
+
+        post_start = time.time()
         with torch.profiler.record_function("vit::post_process"):
             split_sizes = (
                 grid_thw.prod(-1) // self.visual.spatial_merge_size**2
@@ -176,6 +196,10 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
             )
             for e, p, d in zip(embeds, pos_id, deepstack_embeds):
                 res_list.append((e.to(self._data_type), p, d))
+        kmonitor.report(
+            GaugeMetrics.VIT_POST_PROCESS_RT_METRIC, (time.time() - post_start) * 1000
+        )
+
         return res_list
 
 

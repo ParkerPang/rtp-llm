@@ -688,31 +688,57 @@ class MMProcessEngine:
         """Core implementation for multimodal embedding processing."""
         logging.debug(f"{self.server_id} request received")
         try:
-            # 如果不是 proxy 模式（即 standalone 模式），记录 QPS
-            if not self.is_proxy_mode:
+            with Timer() as e2e_timer:
+                # 如果不是 proxy 模式（即 standalone 模式），记录 QPS
+                if not self.is_proxy_mode:
+                    kmonitor.report(
+                        AccMetrics.VIT_QPS_METRIC, 1, {"source": "mm_embedding"}
+                    )
+
+                self.inc_query_num()
+                if not self.vit_config.disable_access_log:
+                    self._access_logger.log_query_access(mm_inputs)
+
+                # 上报图片数量
+                kmonitor.report(GaugeMetrics.VIT_IMAGE_NUM_METRIC, len(mm_inputs))
+
+                work_items = self._create_work_items(mm_inputs)
+                with Timer() as preprocess_timer:
+                    with torch.profiler.record_function("vit::preprocess_wait"):
+                        self._wait_for_preprocessing(work_items)
+                preprocess_wait_ms = preprocess_timer.cost_ms()
+                logging.info(
+                    f"mm_preprocess latency: {preprocess_wait_ms:.2f}ms, items: {len(work_items)}"
+                )
                 kmonitor.report(
-                    AccMetrics.VIT_QPS_METRIC, 1, {"source": "mm_embedding"}
+                    GaugeMetrics.VIT_PREPROCESS_WAIT_RT_METRIC, preprocess_wait_ms
                 )
 
-            self.inc_query_num()
-            if not self.vit_config.disable_access_log:
-                self._access_logger.log_query_access(mm_inputs)
+                with Timer() as embedding_timer:
+                    with torch.profiler.record_function("vit::compute_embeddings"):
+                        emb_res, pos_res, deepstack_embeds_res = (
+                            self._compute_embeddings(work_items)
+                        )
+                logging.info(f"mm_embedding latency: {embedding_timer.cost_ms():.2f}ms")
 
-            work_items = self._create_work_items(mm_inputs)
-            with torch.profiler.record_function("vit::preprocess_wait"):
-                self._wait_for_preprocessing(work_items)
-            with torch.profiler.record_function("vit::compute_embeddings"):
-                emb_res, pos_res, deepstack_embeds_res = self._compute_embeddings(
-                    work_items
-                )
+                work_items = self._create_work_items(mm_inputs)
+                with torch.profiler.record_function("vit::preprocess_wait"):
+                    self._wait_for_preprocessing(work_items)
+                with torch.profiler.record_function("vit::compute_embeddings"):
+                    emb_res, pos_res, deepstack_embeds_res = self._compute_embeddings(
+                        work_items
+                    )
 
-            result = MMEmbeddingRes(emb_res, pos_res, deepstack_embeds_res)
-            if not self.vit_config.disable_access_log:
-                self._access_logger.log_success_access(mm_inputs, str(result))
+                result = MMEmbeddingRes(emb_res, pos_res, deepstack_embeds_res)
+                if not self.vit_config.disable_access_log:
+                    self._access_logger.log_success_access(mm_inputs, str(result))
 
-            # 如果不是 proxy 模式（即 standalone 模式），记录成功 QPS
-            if not self.is_proxy_mode:
-                kmonitor.report(AccMetrics.VIT_SUCCESS_QPS_METRIC, 1)
+                # 如果不是 proxy 模式（即 standalone 模式），记录成功 QPS
+                if not self.is_proxy_mode:
+                    kmonitor.report(AccMetrics.VIT_SUCCESS_QPS_METRIC, 1)
+
+            # 上报端到端耗时
+            kmonitor.report(GaugeMetrics.VIT_E2E_RT_METRIC, e2e_timer.cost_ms())
 
             return result
         except Exception as e:
@@ -775,8 +801,13 @@ class MMProcessEngine:
             batch_outputs = None
             data_list = [wi.preprocess_result for _, wi in pending_items]
             type_list = [wi.mm_type for _, wi in pending_items]
+            lock_wait_start = time.time()
             with Timer() as route_timer:
                 with mm_embedding_lock:
+                    kmonitor.report(
+                        GaugeMetrics.VIT_LOCK_WAIT_RT_METRIC,
+                        (time.time() - lock_wait_start) * 1000,
+                    )
                     batch_outputs = self._vit_profiler.profile_embedding(
                         self.mm_part.batched_embedding,
                         data_list,

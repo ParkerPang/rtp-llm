@@ -66,6 +66,14 @@ class GaugeMetrics(Enum):
     # vit preprocess
     VIT_PREPROCESS_RT_METRIC = "py_rtp_vit_preprocess_rt"
     VIT_EMBEDDING_RT_METRIC = "py_rtp_vit_embedding_rt"
+    VIT_E2E_RT_METRIC = "py_rtp_vit_e2e_rt"
+    VIT_IMAGE_NUM_METRIC = "py_rtp_vit_image_num"
+    VIT_TOTAL_PIXEL_COUNT_METRIC = "py_rtp_vit_total_pixel_count"
+    VIT_PREPROCESS_WAIT_RT_METRIC = "py_rtp_vit_preprocess_wait_rt"
+    VIT_CONCAT_RT_METRIC = "py_rtp_vit_concat_rt"
+    VIT_VISUAL_FORWARD_RT_METRIC = "py_rtp_vit_visual_forward_rt"
+    VIT_POST_PROCESS_RT_METRIC = "py_rtp_vit_post_process_rt"
+    VIT_LOCK_WAIT_RT_METRIC = "py_rtp_vit_lock_wait_rt"
 
 
 class MetricReporter(object):
