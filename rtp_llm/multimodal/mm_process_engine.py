@@ -370,9 +370,10 @@ class _ProfilerSaveWorker:
                 continue
             result, file_name = item
             try:
-                logging.info(f"VitProfiler: saving trace to {file_name} (async)")
+                abs_path = os.path.abspath(file_name)
+                logging.info(f"VitProfiler: saving trace to {abs_path} (async)")
                 result.save(file_name)
-                logging.info(f"VitProfiler: trace saved: {file_name}")
+                logging.info(f"VitProfiler: trace saved: {abs_path}")
             except Exception as e:
                 logging.error(f"VitProfiler: failed to save trace {file_name}: {e}")
 
