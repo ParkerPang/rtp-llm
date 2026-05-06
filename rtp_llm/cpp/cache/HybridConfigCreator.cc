@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/HybridConfigCreator.h"
 
+#include <algorithm>
 #include <numeric>
 
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
@@ -155,14 +156,12 @@ void HybridConfigCreator::setupPhysicalSizes(CacheConfig&          config,
                                              const KVCacheSpecPtr& full_spec,
                                              const KVCacheSpecPtr& linear_spec) {
     // Decide the physical KV block/scale sizes by taking max between full and linear specs.
+    // Either side may be larger (e.g. Qwen3.5 linear state >> full KV), so use max to
+    // ensure every layer's data fits within a single block stride.
     const size_t full_kv_block_stride_bytes   = full_spec->block_size_bytes();
     const size_t linear_kv_block_stride_bytes = linear_spec->block_size_bytes();
 
-    // now we only support that linear attention block have padding
-    RTP_LLM_CHECK_WITH_INFO(full_kv_block_stride_bytes >= linear_kv_block_stride_bytes,
-                            "not support full attention with padding now");
-
-    config.kv_block_stride_bytes = full_kv_block_stride_bytes;
+    config.kv_block_stride_bytes = std::max(full_kv_block_stride_bytes, linear_kv_block_stride_bytes);
     config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
     config.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
     config.kv_scale_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_scale_stride_bytes;
