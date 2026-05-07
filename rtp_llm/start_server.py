@@ -190,7 +190,7 @@ def start_prompt_generator_impl(
         start_prompt_generator,
     )
 
-    pg_server_count = int(os.environ.get("PROMPT_GENERATOR_SERVER_COUNT", "1"))
+    pg_server_count = py_env_configs.server_config.pg_server_count
     assert (
         pg_server_count >= 1
     ), "prompt generator server count must be greater than 0, but got {pg_server_count}"
@@ -272,8 +272,7 @@ def start_server(py_env_configs: PyEnvConfigs):
         monitor_interval=py_env_configs.server_config.monitor_interval,
     )
 
-    enable_mps = os.environ.get("ENABLE_MPS", "") == "true"
-    if enable_mps:
+    if py_env_configs.server_config.enable_mps:
         from internal_source.rtp_llm.prompt_generator.service.start_mps import start_mps
 
         start_mps()
@@ -289,11 +288,7 @@ def start_server(py_env_configs: PyEnvConfigs):
             )
             process_manager.add_process(backend_process)
 
-        enable_prompt_generator = (
-            os.environ.get("ENABLE_PROMPT_GENERATOR", "") == "true"
-        )
-
-        if enable_prompt_generator:
+        if py_env_configs.server_config.enable_prompt_generator:
             logging.info("starting prompt generator server...")
             prompt_generator_processes = start_prompt_generator_impl(
                 global_controller, py_env_configs, process_manager
