@@ -73,18 +73,18 @@ def init_server_group_args(parser, server_config):
         help="启用 prompt generator 服务",
     )
     server_group.add_argument(
-        "--pg_server_count",
-        env_name="PG_SERVER_COUNT",
-        bind_to=(server_config, "pg_server_count"),
+        "--prompt_generator_server_count",
+        env_name="PROMPT_GENERATOR_SERVER_COUNT",
+        bind_to=(server_config, "prompt_generator_server_count"),
         type=int,
         default=1,
-        help="prompt generator服务器启动进程数量",
+        help="prompt generator 服务器启动进程数量",
     )
     server_group.add_argument(
-        "--enable_mps",
-        env_name="ENABLE_MPS",
-        bind_to=(server_config, "enable_mps"),
+        "--enable_prompt_generator_mps",
+        env_name="ENABLE_PROMPT_GENERATOR_MPS",
+        bind_to=(server_config, "enable_prompt_generator_mps"),
         type=str2bool,
         default=False,
-        help="启用 MPS 服务",
+        help="prompt generator 启用 MPS 服务",
     )

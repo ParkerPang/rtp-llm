@@ -56,8 +56,8 @@ class ServerConfig:
         )
         self.monitor_interval: int = 1  # Monitor interval in seconds
         self.enable_prompt_generator: bool = False
-        self.pg_server_count = 1
-        self.enable_mps: bool = False
+        self.prompt_generator_server_count = 1
+        self.enable_prompt_generator_mps: bool = False
 
     def _server_base(self) -> int:
         return self.start_port + self.rank_id * self.worker_info_port_num
@@ -111,8 +111,8 @@ class ServerConfig:
             f"http_port: {self.http_port}\n"
             f"embedding_rpc_server_port: {self.embedding_rpc_server_port}\n"
             f"enable_prompt_generator: {self.enable_prompt_generator}\n"
-            f"pg_server_count: {self.pg_server_count}\n"
-            f"enable_mps: {self.enable_mps}\n"
+            f"prompt_generator_server_count: {self.prompt_generator_server_count}\n"
+            f"enable_prompt_generator_mps: {self.enable_prompt_generator_mps}\n"
         )
 
 
