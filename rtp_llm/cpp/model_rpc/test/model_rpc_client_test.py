@@ -38,7 +38,11 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     GenerateOutputsPB,
     TensorPB,
 )
-from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
+from rtp_llm.utils.base_model_datatypes import (
+    GenerateInput,
+    GenerateOutputs,
+    InputEmbeddings,
+)
 
 
 class FakeStub:
@@ -180,6 +184,40 @@ class ModelRpcClientTest(TestCase):
         logits_2 = res[2].logits.tolist()
         self.assertAlmostEqual(logits_2[0][0], 0.0, places=6)
         self.assertAlmostEqual(logits_2[0][1], 0.0, places=6)
+
+    def test_trans_input_with_input_embeddings(self):
+        generate_config: GenerateConfig = GenerateConfig(using_hf_sampling=False)
+        input = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3, 4]),
+            generate_config=generate_config,
+            request_id=123,
+            mm_inputs=[],
+            input_embeddings=InputEmbeddings([torch.ones([2, 3])], [1]),
+        )
+
+        input_pb = trans_input(input)
+
+        self.assertEqual(list(input_pb.input_embeddings.embedding_locs), [1])
+        self.assertEqual(len(input_pb.input_embeddings.embeddings), 1)
+        self.assertEqual(list(input_pb.input_embeddings.embeddings[0].shape), [2, 3])
+
+    def test_trans_input_rejects_invalid_input_embeddings(self):
+        generate_config: GenerateConfig = GenerateConfig(using_hf_sampling=False)
+        with self.assertRaises(ValueError):
+            InputEmbeddings([torch.ones([1, 3])], [0, 1])
+
+        with self.assertRaises(ValueError):
+            InputEmbeddings([torch.ones([1, 3, 1])], [0])
+
+        input = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3, 4]),
+            generate_config=generate_config,
+            request_id=123,
+            mm_inputs=[],
+            input_embeddings=InputEmbeddings([torch.ones([3, 3])], [2]),
+        )
+        with self.assertRaises(ValueError):
+            trans_input(input)
 
 
 if __name__ == "__main__":

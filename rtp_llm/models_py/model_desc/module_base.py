@@ -104,5 +104,38 @@ class GptModelBase(nn.Module):
         )
         return fmha_impl
 
+    def apply_input_embeddings(
+        self, hidden_states: Tensor, inputs: PyModelInputs
+    ) -> Tensor:
+        input_embeddings = getattr(inputs, "input_embeddings", None)
+        if not input_embeddings:
+            return hidden_states
+
+        input_embeddings_locs = getattr(inputs, "input_embeddings_locs", None)
+        if input_embeddings_locs is None or input_embeddings_locs.numel() != len(
+            input_embeddings
+        ):
+            raise RuntimeError("input_embeddings and input_embeddings_locs size mismatch")
+
+        for idx, input_embedding in enumerate(input_embeddings):
+            loc = int(input_embeddings_locs[idx].item())
+            length = input_embedding.shape[0]
+            if input_embedding.dim() != 2:
+                raise RuntimeError("input_embedding must be a 2-D tensor")
+            if loc < 0 or loc + length > hidden_states.shape[0]:
+                raise RuntimeError(
+                    f"input_embedding range [{loc}, {loc + length}) exceeds "
+                    f"hidden_states length {hidden_states.shape[0]}"
+                )
+            if input_embedding.shape[1] != hidden_states.shape[1]:
+                raise RuntimeError(
+                    f"input_embedding hidden size {input_embedding.shape[1]} "
+                    f"does not match model hidden size {hidden_states.shape[1]}"
+                )
+            hidden_states[loc : loc + length] = input_embedding.to(
+                device=hidden_states.device, dtype=hidden_states.dtype
+            )
+        return hidden_states
+
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         raise NotImplementedError("forward method must be implemented in subclass")

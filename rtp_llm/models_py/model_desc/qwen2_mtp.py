@@ -65,6 +65,7 @@ class Qwen2MtpModel(GptModelBase):
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         inputs_embeds = self.embed_tokens(input_ids)
+        inputs_embeds = self.apply_input_embeddings(inputs_embeds, inputs)
         embedding_hidden_states = inputs_embeds
         last_hidden_states = inputs.input_hiddens
 

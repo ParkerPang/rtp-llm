@@ -218,12 +218,27 @@ def trans_embedding_inputs(input_py: GenerateInput, input_pb: GenerateInputPB):
 
     input_embeddings_pb = input_pb.input_embeddings
     embedding_inputs = input_py.input_embeddings
+    token_num = int(input_py.token_ids.numel())
 
-    # 转换 embeddings
+    if len(embedding_inputs.embeddings) != len(embedding_inputs.embedding_locs):
+        raise ValueError("input_embeddings embeddings size does not match embedding_locs size")
+
+    for idx, (embedding, loc) in enumerate(
+        zip(embedding_inputs.embeddings, embedding_inputs.embedding_locs)
+    ):
+        if embedding.dim() != 2:
+            raise ValueError(f"input_embeddings.embeddings[{idx}] must be a 2-D tensor")
+        if loc < 0:
+            raise ValueError(f"input_embeddings.embedding_locs[{idx}] must be non-negative")
+        if loc + embedding.shape[0] > token_num:
+            raise ValueError(
+                f"input_embeddings[{idx}] range [{loc}, {loc + embedding.shape[0]}) "
+                f"exceeds token_ids length {token_num}"
+            )
+
     tensor_pbs = [trans_from_tensor(emb) for emb in embedding_inputs.embeddings]
     input_embeddings_pb.embeddings.extend(tensor_pbs)
 
-    # 转换 embedding_locs
     input_embeddings_pb.embedding_locs.extend(embedding_inputs.embedding_locs)
 
 

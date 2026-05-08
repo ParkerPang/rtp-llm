@@ -195,8 +195,9 @@ TEST_F(QueryConverterTest, TransTensorPB_UnsupportedType) {
 
 TEST_F(QueryConverterTest, testTransInputWithInputEmbeddings_FP32) {
     GenerateInputPB input;
-    input.add_token_ids(0);
-    input.add_token_ids(1);
+    for (int i = 0; i < 12; ++i) {
+        input.add_token_ids(i);
+    }
 
     // 创建 input_embeddings
     auto* input_embeddings_pb = input.mutable_input_embeddings();
@@ -262,7 +263,9 @@ TEST_F(QueryConverterTest, testTransInputWithInputEmbeddings_FP32) {
 
 TEST_F(QueryConverterTest, testTransInputWithInputEmbeddings_FP16) {
     GenerateInputPB input;
-    input.add_token_ids(0);
+    for (int i = 0; i < 5; ++i) {
+        input.add_token_ids(i);
+    }
 
     // 创建 input_embeddings (FP16)
     auto* input_embeddings_pb = input.mutable_input_embeddings();
@@ -291,7 +294,9 @@ TEST_F(QueryConverterTest, testTransInputWithInputEmbeddings_FP16) {
 
 TEST_F(QueryConverterTest, testTransInputWithInputEmbeddings_BF16) {
     GenerateInputPB input;
-    input.add_token_ids(0);
+    for (int i = 0; i < 3; ++i) {
+        input.add_token_ids(i);
+    }
 
     // 创建 input_embeddings (BF16)
     auto* input_embeddings_pb = input.mutable_input_embeddings();
@@ -314,6 +319,29 @@ TEST_F(QueryConverterTest, testTransInputWithInputEmbeddings_BF16) {
     ASSERT_EQ(embeddings.size(), 1);
     ASSERT_EQ(embeddings[0].dtype(), torch::kBFloat16);
     ASSERT_EQ(embeddings[0].dim(), 2);
+}
+
+TEST_F(QueryConverterTest, testTransInputWithInvalidInputEmbeddings) {
+    GenerateInputPB input;
+    input.add_token_ids(0);
+    input.add_token_ids(1);
+    input.add_token_ids(2);
+
+    auto* embedding_pb = input.mutable_input_embeddings()->add_embeddings();
+    embedding_pb->set_data_type(TensorPB::FP32);
+    embedding_pb->add_shape(2);
+    embedding_pb->add_shape(2);
+    std::vector<float> embedding_data = {1.0f, 2.0f, 3.0f, 4.0f};
+    embedding_pb->set_fp32_data(reinterpret_cast<const char*>(embedding_data.data()),
+                                embedding_data.size() * sizeof(float));
+
+    EXPECT_THROW(QueryConverter::transQuery(&input), std::runtime_error);
+
+    input.mutable_input_embeddings()->add_embedding_locs(-1);
+    EXPECT_THROW(QueryConverter::transQuery(&input), std::runtime_error);
+
+    input.mutable_input_embeddings()->set_embedding_locs(0, 2);
+    EXPECT_THROW(QueryConverter::transQuery(&input), std::runtime_error);
 }
 
 TEST_F(QueryConverterTest, testTransInputWithoutInputEmbeddings) {

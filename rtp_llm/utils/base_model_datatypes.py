@@ -31,6 +31,15 @@ class InputEmbeddings:
         embeddings: List[torch.Tensor],
         embedding_locs: List[int],
     ):
+        if len(embeddings) != len(embedding_locs):
+            raise ValueError("embeddings and embedding_locs must have the same length")
+        for idx, (embedding, loc) in enumerate(zip(embeddings, embedding_locs)):
+            if not isinstance(embedding, torch.Tensor):
+                raise TypeError(f"embeddings[{idx}] must be a torch.Tensor")
+            if embedding.dim() != 2:
+                raise ValueError(f"embeddings[{idx}] must be a 2-D tensor")
+            if loc < 0:
+                raise ValueError(f"embedding_locs[{idx}] must be non-negative")
         self.embeddings = embeddings
         self.embedding_locs = embedding_locs
 

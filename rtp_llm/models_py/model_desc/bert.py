@@ -142,6 +142,7 @@ class BertModel(GptModelBase):
             bert_embedding_inputs.token_type_embedding,
             bert_embedding_inputs.input_embedding_scalar,
         )
+        inputs_embeds = self.apply_input_embeddings(inputs_embeds, inputs)
         hidden_states = self.pre_decoder_layernorm(inputs_embeds)
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)

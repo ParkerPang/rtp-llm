@@ -147,16 +147,26 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<PyModelInputs>(m, "PyModelInputs")
         .def(pybind11::init<>())
-        .def(pybind11::init<torch::Tensor, torch::Tensor, PyAttentionInputs, BertEmbeddingInputs>(),
+        .def(pybind11::init<torch::Tensor,
+                            torch::Tensor,
+                            PyAttentionInputs,
+                            BertEmbeddingInputs,
+                            std::vector<torch::Tensor>,
+                            torch::Tensor>(),
              pybind11::arg("input_ids")             = torch::empty(0),
              pybind11::arg("input_hiddens")         = torch::empty(0),
              pybind11::arg("attention_inputs")      = PyAttentionInputs(),
-             pybind11::arg("bert_embedding_inputs") = BertEmbeddingInputs())
+             pybind11::arg("bert_embedding_inputs") = BertEmbeddingInputs(),
+             pybind11::arg("input_embeddings")      = std::vector<torch::Tensor>(),
+             pybind11::arg("input_embeddings_locs") = torch::empty({0}, torch::kInt32))
         .def_readwrite("input_ids", &PyModelInputs::input_ids, "Input token IDs tensor")
         .def_readwrite("input_hiddens", &PyModelInputs::input_hiddens, "Input hidden states tensor")
         .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs, "Attention inputs structure")
         .def_readwrite(
-            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure");
+            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure")
+        .def_readwrite("input_embeddings", &PyModelInputs::input_embeddings, "Overriding input embedding tensors")
+        .def_readwrite(
+            "input_embeddings_locs", &PyModelInputs::input_embeddings_locs, "Overriding input embedding locations");
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")

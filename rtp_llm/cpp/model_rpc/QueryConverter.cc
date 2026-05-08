@@ -138,25 +138,40 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
         generate_input->batch_group_id = input->batch_group_id().value();
     }
 
-    // 转换 input_embeddings
-    if (input->has_input_embeddings() && input->input_embeddings().embeddings_size() > 0) {
+    if (input->has_input_embeddings()) {
         const auto&                input_embeddings_pb = input->input_embeddings();
         std::vector<torch::Tensor> embeddings;
         std::vector<int32_t>       embedding_locs;
+        const int                  embeddings_size = input_embeddings_pb.embeddings_size();
+        const int                  locs_size       = input_embeddings_pb.embedding_locs_size();
 
-        // 转换 embeddings
-        for (int i = 0; i < input_embeddings_pb.embeddings_size(); i++) {
-            embeddings.push_back(transTensor(input_embeddings_pb.embeddings(i)));
+        if (embeddings_size != locs_size) {
+            throw std::runtime_error("input_embeddings embeddings size does not match embedding_locs size");
         }
 
-        // 转换 embedding_locs
-        embedding_locs.resize(input_embeddings_pb.embedding_locs_size());
-        memcpy(embedding_locs.data(),
-               input_embeddings_pb.embedding_locs().data(),
-               input_embeddings_pb.embedding_locs_size() * sizeof(int32_t));
+        embeddings.reserve(embeddings_size);
+        embedding_locs.reserve(locs_size);
+        for (int i = 0; i < embeddings_size; i++) {
+            auto    embedding = transTensor(input_embeddings_pb.embeddings(i));
+            int32_t loc       = input_embeddings_pb.embedding_locs(i);
 
-        generate_input->input_embeddings      = embeddings;
-        generate_input->input_embeddings_locs = embedding_locs;
+            if (embedding.dim() != 2) {
+                throw std::runtime_error("input_embedding must be a 2-D tensor");
+            }
+            if (loc < 0) {
+                throw std::runtime_error("input_embedding loc must be non-negative");
+            }
+            if ((int64_t)loc + embedding.size(0) > input->token_ids_size()) {
+                throw std::runtime_error("input_embedding range exceeds token_ids length");
+            }
+            embeddings.emplace_back(std::move(embedding));
+            embedding_locs.emplace_back(loc);
+        }
+
+        if (!embeddings.empty()) {
+            generate_input->input_embeddings      = std::move(embeddings);
+            generate_input->input_embeddings_locs = std::move(embedding_locs);
+        }
     }
 
     return generate_input;
