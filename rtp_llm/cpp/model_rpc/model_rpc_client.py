@@ -168,9 +168,7 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.combo_token_size = input_py.generate_config.combo_token_size
     for i in range(len(input_py.generate_config.banned_combo_token_ids)):
         banned_combo = generate_config_pb.banned_combo_token_ids.rows.add()
-        banned_combo.values.extend(
-            input_py.generate_config.banned_combo_token_ids[i]
-        )
+        banned_combo.values.extend(input_py.generate_config.banned_combo_token_ids[i])
 
     for role_addr in input_py.generate_config.role_addrs:
         role_addr_pb = RoleAddrPB()
@@ -388,7 +386,9 @@ class ModelRpcClient(object):
                         f"batch item {i} failed: {result_pb.error_info.error_message}",
                     )
                 stream_state = StreamState()
-                output = self.trans_output(inputs[i], result_pb.final_output, stream_state)
+                output = self.trans_output(
+                    inputs[i], result_pb.final_output, stream_state
+                )
                 results.append(output)
             return results
 
@@ -548,3 +548,11 @@ class ModelRpcClient(object):
             outputs_py.generate_outputs.append(output_py)
 
         return outputs_py
+
+
+def trans_output(
+    input_py: GenerateInput,
+    outputs_pb: GenerateOutputsPB,
+    stream_state: StreamState,
+) -> GenerateOutputs:
+    return ModelRpcClient.trans_output(None, input_py, outputs_pb, stream_state)
