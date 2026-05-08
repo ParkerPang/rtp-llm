@@ -19,9 +19,27 @@ from rtp_llm.config.server_config_setup import setup_and_configure_server
 from rtp_llm.ops import RoleType
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
+from rtp_llm.utils.import_util import has_internal_source
 from rtp_llm.utils.process_manager import ProcessManager
 
 setup_logging()
+
+
+def normalize_prompt_generator_config(py_env_configs: PyEnvConfigs):
+    server_config = py_env_configs.server_config
+
+    if server_config.enable_prompt_generator_mps and not server_config.enable_prompt_generator:
+        logging.warning(
+            "disable prompt generator mps because prompt generator is disabled"
+        )
+        server_config.enable_prompt_generator_mps = False
+
+    if server_config.enable_prompt_generator and not has_internal_source():
+        logging.warning(
+            "prompt generator is unavailable in this build; fallback to frontend server"
+        )
+        server_config.enable_prompt_generator = False
+        server_config.enable_prompt_generator_mps = False
 
 
 def check_server_health(server_port):
@@ -247,6 +265,7 @@ def start_prompt_generator_impl(
 
 def main():
     py_env_configs: PyEnvConfigs = setup_args()
+    normalize_prompt_generator_config(py_env_configs)
     setup_and_configure_server(py_env_configs)
     start_server(py_env_configs)
 
@@ -254,6 +273,7 @@ def main():
 def start_server(py_env_configs: PyEnvConfigs):
     logging.info(f"[PROCESS_START]Start server")
     start_time = time.time()
+    normalize_prompt_generator_config(py_env_configs)
     try:
         multiprocessing.set_start_method("spawn")
     except RuntimeError as e:
