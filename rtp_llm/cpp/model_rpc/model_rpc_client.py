@@ -1,6 +1,6 @@
 import functools
 import logging
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Callable, Optional
 
 import grpc
 from grpc import StatusCode
@@ -389,6 +389,7 @@ class ModelRpcClient(object):
         client_config,
         max_rpc_timeout_ms: int = 0,
         decode_entrance: bool = False,
+        trans_output_fn: Optional[Callable] = None,
     ):
         """Initialize ModelRpcClient with addresses.
 
@@ -396,10 +397,14 @@ class ModelRpcClient(object):
             addresses: List of RPC addresses for data parallel communication
             max_rpc_timeout_ms: Maximum RPC timeout in milliseconds
             decode_entrance: Whether this is a decode entrance
+            trans_output_fn: Custom function to transform protobuf outputs to Python objects.
+                Signature: (GenerateInput, GenerateOutputsPB, StreamState) -> GenerateOutputs.
+                If None, uses the default implementation.
         """
         self._addresses = addresses
         self._max_rpc_timeout_ms = max_rpc_timeout_ms
         self._decode_entrance = decode_entrance
+        self._trans_output_fn = trans_output_fn or trans_output
         self._options = []
         for key, value in client_config.items():
             self._options.append((key, value))
@@ -488,7 +493,7 @@ class ModelRpcClient(object):
             )
             # 调用服务器方法并接收流式响应
             async for response in response_iterator.__aiter__():
-                yield trans_output(input_py, response, stream_state)
+                yield self._trans_output_fn(input_py, response, stream_state)
         except grpc.RpcError as e:
             if response_iterator:
                 response_iterator.cancel()
@@ -536,7 +541,9 @@ class ModelRpcClient(object):
                         f"batch item {i} failed: {result_pb.error_info.error_message}",
                     )
                 stream_state = StreamState()
-                output = trans_output(inputs[i], result_pb.final_output, stream_state)
+                output = self._trans_output_fn(
+                    inputs[i], result_pb.final_output, stream_state
+                )
                 results.append(output)
             return results
 
