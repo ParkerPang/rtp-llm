@@ -128,7 +128,7 @@ def start_frontend_server_impl(
     frontend_server_count = py_env_configs.server_config.frontend_server_count
     if frontend_server_count < 1:
         logging.info(
-            "frontend server's count is {frontend_server_count}, this may be a mistake"
+            f"frontend server's count is {frontend_server_count}, this may be a mistake"
         )
 
     frontend_processes = []
@@ -190,10 +190,11 @@ def start_prompt_generator_impl(
         start_prompt_generator,
     )
 
-    pg_server_count = int(os.environ.get("PROMPT_GENERATOR_SERVER_COUNT", "1"))
-    assert (
-        pg_server_count >= 1
-    ), "prompt generator server count must be greater than 0, but got {pg_server_count}"
+    pg_server_count = py_env_configs.server_config.prompt_generator_server_count
+    if pg_server_count < 1:
+        raise ValueError(
+            f"prompt generator server count must be greater than 0, but got {pg_server_count}"
+        )
 
     prompt_processes = []
 
@@ -209,7 +210,7 @@ def start_prompt_generator_impl(
             f"multi rank starts with default local world size: {local_world_size}, world size = {pc.world_size}"
         )
 
-    # To reduce the number of frontend servers, we only start those with tp_rank=0;
+    # To reduce the number of prompt generator servers, we only start those with tp_rank=0;
     # however, since k8s needs to check machine heartbeat, rank 0 on each machine also needs to be started.
     for rank in range(local_world_size):
         for i in range(pg_server_count):
@@ -272,10 +273,13 @@ def start_server(py_env_configs: PyEnvConfigs):
         monitor_interval=py_env_configs.server_config.monitor_interval,
     )
 
-    enable_mps = os.environ.get("ENABLE_MPS", "") == "true"
-    if enable_mps:
+    if (
+        py_env_configs.server_config.enable_prompt_generator
+        and py_env_configs.server_config.enable_prompt_generator_mps
+    ):
         from internal_source.rtp_llm.prompt_generator.service.start_mps import start_mps
 
+        logging.info("starting prompt generator mps...")
         start_mps()
 
     # Initialize backend_process to None in case role_type is FRONTEND
@@ -289,11 +293,7 @@ def start_server(py_env_configs: PyEnvConfigs):
             )
             process_manager.add_process(backend_process)
 
-        enable_prompt_generator = (
-            os.environ.get("ENABLE_PROMPT_GENERATOR", "") == "true"
-        )
-
-        if enable_prompt_generator:
+        if py_env_configs.server_config.enable_prompt_generator:
             logging.info("starting prompt generator server...")
             prompt_generator_processes = start_prompt_generator_impl(
                 global_controller, py_env_configs, process_manager
