@@ -75,20 +75,49 @@ struct KVCache {
 
             // [block_num, kv_block_stride_elems] shared by all layer types.
             if (base.defined() && base.dim() == 2) {
-                const int64_t physical_block_num = base.size(0);
-                const int64_t kernel_block_num   = physical_block_num * kernel_blocks_per_kv_block;
+                const int64_t physical_block_num    = base.size(0);
+                const int64_t physical_block_stride = base.size(1);  // max stride in hybrid mode
+                const int64_t kernel_block_num      = physical_block_num * kernel_blocks_per_kv_block;
                 if (use_mla && kv_lora_rank > 0 && rope_head_dim > 0) {
                     // MLA layout: [kernel_block_num, kernel_seq_size_per_block, kv_lora_rank + rope_head_dim]
-                    layer_cache.kv_cache_base = base.reshape({kernel_block_num,
-                                                              (int64_t)kernel_seq_size_per_block,
-                                                              (int64_t)(kv_lora_rank + rope_head_dim)});
+                    const int64_t full_stride_elems =
+                        (int64_t)kernel_seq_size_per_block * (int64_t)(kv_lora_rank + rope_head_dim);
+                    if (physical_block_stride == full_stride_elems * kernel_blocks_per_kv_block) {
+                        layer_cache.kv_cache_base = base.reshape({kernel_block_num,
+                                                                  (int64_t)kernel_seq_size_per_block,
+                                                                  (int64_t)(kv_lora_rank + rope_head_dim)});
+                    } else {
+                        // Hybrid: physical stride > needed. Use as_strided for a zero-copy view.
+                        const int64_t mla_dim             = (int64_t)(kv_lora_rank + rope_head_dim);
+                        const int64_t kernel_block_stride = physical_block_stride / kernel_blocks_per_kv_block;
+                        layer_cache.kv_cache_base =
+                            base.as_strided({kernel_block_num, (int64_t)kernel_seq_size_per_block, mla_dim},
+                                            {kernel_block_stride, mla_dim, 1});
+                    }
                 } else if (num_kv_heads > 0 && head_dim > 0) {
                     // MHA layout: [kernel_block_num, 2, num_kv_heads, kernel_seq_size_per_block, head_dim]
-                    layer_cache.kv_cache_base = base.reshape({kernel_block_num,
-                                                              2,
-                                                              (int64_t)num_kv_heads,
-                                                              (int64_t)kernel_seq_size_per_block,
-                                                              (int64_t)head_dim});
+                    const int64_t full_stride_elems =
+                        2LL * (int64_t)num_kv_heads * (int64_t)kernel_seq_size_per_block * (int64_t)head_dim;
+                    if (physical_block_stride == full_stride_elems * kernel_blocks_per_kv_block) {
+                        layer_cache.kv_cache_base = base.reshape({kernel_block_num,
+                                                                  2,
+                                                                  (int64_t)num_kv_heads,
+                                                                  (int64_t)kernel_seq_size_per_block,
+                                                                  (int64_t)head_dim});
+                    } else {
+                        // Hybrid: physical stride > needed. Use as_strided for a zero-copy view.
+                        const int64_t kernel_block_stride = physical_block_stride / kernel_blocks_per_kv_block;
+                        const int64_t kv_stride =
+                            (int64_t)num_kv_heads * (int64_t)kernel_seq_size_per_block * (int64_t)head_dim;
+                        const int64_t head_stride = (int64_t)kernel_seq_size_per_block * (int64_t)head_dim;
+                        layer_cache.kv_cache_base =
+                            base.as_strided({kernel_block_num,
+                                             2,
+                                             (int64_t)num_kv_heads,
+                                             (int64_t)kernel_seq_size_per_block,
+                                             (int64_t)head_dim},
+                                            {kernel_block_stride, kv_stride, head_stride, (int64_t)head_dim, 1});
+                    }
                 } else {
                     layer_cache.kv_cache_base = base;
                 }
