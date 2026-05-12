@@ -319,6 +319,15 @@ int GenerateStream::initialReuseLength() const {
 
 void GenerateStream::setReuseLength(int reuse_length) {
     reuse_length_ = reuse_length;
+    // Cap reuseLength so it doesn't exceed any input_embeddings location.
+    // Otherwise the adjusted loc (loc - reuseLength) would become negative.
+    if (generate_input_->input_embeddings_locs) {
+        for (int32_t loc : generate_input_->input_embeddings_locs.value()) {
+            if (reuse_length_ > loc) {
+                reuse_length_ = loc;
+            }
+        }
+    }
     if (generate_input_->mm_locs) {
         auto& locs      = generate_input_->mm_locs.value();
         auto* locs_data = locs.data_ptr<int32_t>();
@@ -426,6 +435,20 @@ torch::Tensor GenerateStream::multimodalLocations() const {
     }
     auto& mm_locs = generate_input_->mm_locs.value();
     return mm_locs.slice(0, reuse_mm_length_, mm_locs.numel());
+}
+
+bool GenerateStream::hasInputEmbeddings() const {
+    return generate_input_->input_embeddings.has_value();
+}
+
+const std::vector<torch::Tensor>& GenerateStream::inputEmbeddings() const {
+    static const std::vector<torch::Tensor> empty;
+    return generate_input_->input_embeddings.has_value() ? generate_input_->input_embeddings.value() : empty;
+}
+
+const std::vector<int32_t>& GenerateStream::inputEmbeddingsLocs() const {
+    static const std::vector<int32_t> empty;
+    return generate_input_->input_embeddings_locs.has_value() ? generate_input_->input_embeddings_locs.value() : empty;
 }
 
 vector<int> GenerateStream::textTokensMask() const {
