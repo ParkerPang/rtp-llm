@@ -24,7 +24,12 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateOutputs,
 )
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
-from rtp_llm.utils.grpc_util import trans_option, trans_option_cast, trans_tensor
+from rtp_llm.utils.grpc_util import (
+    trans_from_tensor,
+    trans_option,
+    trans_option_cast,
+    trans_tensor,
+)
 
 MAX_GRPC_TIMEOUT_SECONDS = 3600
 
@@ -56,6 +61,8 @@ def trans_input(input_py: GenerateInput):
         input_pb.batch_group_id.value = input_py.batch_group_id
 
     trans_multimodal_input(input_py, input_pb, input_py.generate_config)
+
+    trans_embedding_inputs(input_py, input_pb)
     # check generate config is valid before enter into engine
     input_py.generate_config.validate()
 
@@ -161,9 +168,7 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.combo_token_size = input_py.generate_config.combo_token_size
     for i in range(len(input_py.generate_config.banned_combo_token_ids)):
         banned_combo = generate_config_pb.banned_combo_token_ids.rows.add()
-        banned_combo.values.extend(
-            input_py.generate_config.banned_combo_token_ids[i]
-        )
+        banned_combo.values.extend(input_py.generate_config.banned_combo_token_ids[i])
 
     for role_addr in input_py.generate_config.role_addrs:
         role_addr_pb = RoleAddrPB()
@@ -205,6 +210,27 @@ def trans_multimodal_input(
         mm_preprocess_config_pb.min_frames = mm_input.config.min_frames
         mm_preprocess_config_pb.max_frames = mm_input.config.max_frames
         input_pb.multimodal_inputs.append(mm_input_pb)
+
+
+def trans_embedding_inputs(input_py: GenerateInput, input_pb: GenerateInputPB):
+    if input_py.input_embeddings is None:
+        return
+
+    embedding_inputs = input_py.input_embeddings
+    if len(embedding_inputs.embeddings) != len(embedding_inputs.embedding_locs):
+        raise ValueError(
+            f"input_embeddings count ({len(embedding_inputs.embeddings)}) "
+            f"!= embedding_locs count ({len(embedding_inputs.embedding_locs)})"
+        )
+
+    input_embeddings_pb = input_pb.input_embeddings
+
+    # 转换 embeddings
+    tensor_pbs = [trans_from_tensor(emb) for emb in embedding_inputs.embeddings]
+    input_embeddings_pb.embeddings.extend(tensor_pbs)
+
+    # 转换 embedding_locs
+    input_embeddings_pb.embedding_locs.extend(embedding_inputs.embedding_locs)
 
 
 # 假设 trans_tensor 函数将 Protobuf 的 TensorPB 转换为 numpy array
