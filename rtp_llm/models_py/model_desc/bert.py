@@ -132,6 +132,10 @@ class BertModel(GptModelBase):
     def forward(
         self, inputs: PyModelInputs, fmha_impl: FMHAImplBase = None
     ) -> PyModelOutputs:
+        if inputs.input_embeddings is not None:
+            raise NotImplementedError(
+                "input_embeddings is not supported for BERT/embedding models"
+            )
         input_ids: torch.Tensor = inputs.input_ids
         bert_embedding_inputs = inputs.bert_embedding_inputs
         inputs_embeds = self.embed_tokens(

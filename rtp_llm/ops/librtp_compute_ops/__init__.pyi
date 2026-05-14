@@ -279,6 +279,22 @@ class PyModelInputs:
 
     @input_ids.setter
     def input_ids(self, arg0: torch.Tensor) -> None: ...
+    @property
+    def input_embeddings(self) -> typing.Optional[typing.List[torch.Tensor]]:
+        """
+        Input embeddings tensors
+        """
+
+    @input_embeddings.setter
+    def input_embeddings(self, arg0: typing.Optional[typing.List[torch.Tensor]]) -> None: ...
+    @property
+    def input_embeddings_locs(self) -> torch.Tensor:
+        """
+        Input embeddings locations
+        """
+
+    @input_embeddings_locs.setter
+    def input_embeddings_locs(self, arg0: torch.Tensor) -> None: ...
 
 class PyModelOutputs:
     @typing.overload

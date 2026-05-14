@@ -56,6 +56,23 @@ void PyWrappedModel::releaseBuffers() {
     buffer_holder_.release();
 }
 
+void PyWrappedModel::attachInputEmbeddings(torch_ext::PyModelInputs& py_inputs, const GptModelInputs& inputs) {
+    if (inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty()) {
+        std::vector<torch::Tensor> cuda_embeddings;
+        cuda_embeddings.reserve(inputs.input_embeddings->size());
+        for (const auto& emb : inputs.input_embeddings.value()) {
+            cuda_embeddings.push_back(emb.is_cuda() ? emb : emb.cuda());
+        }
+        py_inputs.input_embeddings = std::move(cuda_embeddings);
+        // Keep locs on CPU to avoid device-host sync when Python reads .item()
+        if (inputs.input_embeddings_locs.defined()) {
+            py_inputs.input_embeddings_locs = inputs.input_embeddings_locs.is_cpu() ?
+                                                  inputs.input_embeddings_locs :
+                                                  inputs.input_embeddings_locs.cpu();
+        }
+    }
+}
+
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
@@ -340,7 +357,12 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         torch::Tensor token_ids = micro_inputs.combo_tokens.clone().cuda();
         torch::Tensor input_hiddens =
             inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
-        input_list.emplace_back(PyModelInputs{token_ids, input_hiddens, py_attn_inputs, bert_embedding_inputs});
+        auto py_model_input = PyModelInputs{token_ids, input_hiddens, py_attn_inputs, bert_embedding_inputs};
+        // When input_embeddings is present, planMicroBatches() returns disabled,
+        // so micro_inputs here is the unsplit full inputs (i == 0 only).
+        // Safe to attach without coordinate remapping.
+        attachInputEmbeddings(py_model_input, micro_inputs);
+        input_list.emplace_back(std::move(py_model_input));
     }
 
     if (!inputs.warmup && inputs.pd_separation) {
@@ -418,6 +440,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
         PyContextParallelParams cp_params;
         if (device_props_.enable_prefill_cp) {
+            RTP_LLM_CHECK_WITH_INFO(!inputs.input_embeddings.has_value() || inputs.input_embeddings->empty(),
+                                    "input_embeddings is not supported with context parallel (enable_prefill_cp). "
+                                    "CP rewrites combo_tokens layout, making input_embeddings_locs invalid.");
             context_parallel_processor_->handleInputs(const_cast<GptModelInputs&>(inputs), cp_params);
         }
 
@@ -447,6 +472,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         fusedCopy(d2d_copies_);
 
         auto py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs, bert_embedding_inputs});
+        attachInputEmbeddings(py_model_inputs, inputs);
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
@@ -646,6 +672,15 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
 MicroBatchPlan PyWrappedModel::planMicroBatches(const GptModelInputs& inputs) {
     if (!int(device_props_.enable_layer_micro_batch)) {
         RTP_LLM_LOG_DEBUG("micro batch disable when enable_layer_micro_batch is false");
+        return {false, {}};
+    }
+
+    // input_embeddings_locs are global offsets into combo_tokens. Splitting into
+    // micro-batches would require remapping locs to local coordinates and partitioning
+    // embeddings across slices. Disable micro-batch when input_embeddings is present
+    // to avoid out-of-bounds writes or silently dropped embeddings.
+    if (inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty()) {
+        RTP_LLM_LOG_DEBUG("micro batch disable when input_embeddings is present");
         return {false, {}};
     }
 

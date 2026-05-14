@@ -219,10 +219,12 @@ struct BertEmbeddingInputs {
 };
 
 struct PyModelInputs {
-    torch::Tensor       input_ids;
-    torch::Tensor       input_hiddens;
-    PyAttentionInputs   attention_inputs;
-    BertEmbeddingInputs bert_embedding_inputs;
+    torch::Tensor                             input_ids;
+    torch::Tensor                             input_hiddens;
+    PyAttentionInputs                         attention_inputs;
+    BertEmbeddingInputs                       bert_embedding_inputs;
+    std::optional<std::vector<torch::Tensor>> input_embeddings;
+    torch::Tensor                             input_embeddings_locs;
 };
 
 struct PyModelOutputs {

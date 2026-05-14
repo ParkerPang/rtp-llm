@@ -358,6 +358,12 @@ class Qwen3GemmModel(DisaggregateModelBase):
         return t
 
     def forward_micro_batch(self, inputs: List[PyModelInputs]) -> List[PyModelOutputs]:
+        for inp in inputs:
+            if inp.input_embeddings is not None:
+                raise NotImplementedError(
+                    "input_embeddings is not supported in disaggregate path. "
+                    "Disaggregate forward receives input_ids via NCCL, not from PyModelInputs."
+                )
         input_ids_list, batch_split_info = self.recv_micro_batch_split_info()
         micro_batch_inputs: List[torch.Tensor] = []
         residuals: List[torch.Tensor] = []
@@ -464,6 +470,12 @@ class Qwen3AttnModel(DisaggregateModelBase):
     def forward_micro_batch(
         self, mirco_batch_inputs: List[PyModelInputs]
     ) -> List[PyModelOutputs]:
+        for inp in mirco_batch_inputs:
+            if inp.input_embeddings is not None:
+                raise NotImplementedError(
+                    "input_embeddings is not supported in disaggregate attention path. "
+                    "Attention model receives data via NCCL, not from PyModelInputs."
+                )
         self.send_mirco_batch_split_info(mirco_batch_inputs)
         for i, layer in enumerate(self.attention_layers[: self.layer_num]):
             for idx, mirco_batch_input in enumerate(mirco_batch_inputs):

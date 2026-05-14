@@ -104,5 +104,15 @@ class GptModelBase(nn.Module):
         )
         return fmha_impl
 
+    @staticmethod
+    def apply_input_embeddings(inputs_embeds: Tensor, inputs: PyModelInputs) -> Tensor:
+        if inputs.input_embeddings is not None:
+            for i, emb in enumerate(inputs.input_embeddings):
+                loc = inputs.input_embeddings_locs[i].item()
+                inputs_embeds[loc : loc + emb.size(0)] = emb.to(
+                    device=inputs_embeds.device, dtype=inputs_embeds.dtype
+                )
+        return inputs_embeds
+
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         raise NotImplementedError("forward method must be implemented in subclass")
