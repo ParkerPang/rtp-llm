@@ -3,8 +3,9 @@
 namespace rtp_llm {
 
 ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput() {
-    // TODO(xinfei.sxf) 某些case下会出现1s的等待
-    while ((!hasError()) && getStatus() != StreamState::FINISHED && generate_outputs_queue_.isEmpty()) {
+    // Use finished_ (atomic, set by updateOutput) instead of getStatus() (state-machine,
+    // transitions only in next schedule() call) to avoid 1-second waitNotEmpty() stall.
+    while ((!hasError()) && !finished_.load(std::memory_order_acquire) && generate_outputs_queue_.isEmpty()) {
         checkTimeout();
         generate_outputs_queue_.waitNotEmpty();
     }
@@ -12,7 +13,7 @@ ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput() {
         return statusInfo();
     }
     if (generate_outputs_queue_.isEmpty()) {
-        if (isFinished()) {
+        if (finished_.load(std::memory_order_acquire) || isFinished()) {
             return ErrorInfo(ErrorCode::FINISHED, "finished");
         } else {
             return ErrorInfo(ErrorCode::OUTPUT_QUEUE_IS_EMPTY, "output queue is empty");
@@ -173,8 +174,10 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         setSoftmaxProbs(update_info.softmax_probs, seqLength() - update_info.num_new_tokens);
     }
 
-    finished_ = needFinish();
-    if (finished_) {
+    bool is_finished = needFinish();
+    // Delay finished_.store(true) until after final output is enqueued, so the consumer
+    // in nextOutput() cannot see finished_==true while the queue is still empty.
+    if (is_finished) {
         reportEventWithoutLock(StreamEvents::GenerateDone);
         fillSubGenerateStatus(StreamState::FINISHED);
     }
@@ -188,29 +191,42 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     // TODO: move it to better position
     RTP_LLM_LOG_DEBUG("stream [%ld] finished: %d, pd_sep: %d, is_streaming: %d, need_remote_generate: %d",
                       streamId(),
-                      finished_,
+                      is_finished,
                       queryPdSep(),
                       isStreaming(),
                       update_info.update_remote_generate);
 
-    if (!finished_ && queryPdSep() && update_info.update_remote_generate) {
+    if (!is_finished && queryPdSep() && update_info.update_remote_generate) {
         holdKVCacheForPDSep();
         reportEventWithoutLock(StreamEvents::NeedRemoteGenerate);
         reportEventWithoutLock(StreamEvents::GenerateDone);
     }
 
     bool pd_sep_first_token = queryPdSep();
-    bool need_update        = pd_sep_first_token || isStreaming() || finished_;
+    bool need_update        = pd_sep_first_token || isStreaming() || is_finished;
     if (!need_update) {
         return;
     }
 
     if (seqLength() - last_output_pos_ == 0) {
+        // Finished but no new tokens to enqueue — publish finished_ and wake consumer.
+        if (is_finished) {
+            finished_.store(true, std::memory_order_release);
+            generate_outputs_queue_.wakeup();
+        }
         return;
     }
 
     RTP_LLM_LOG_DEBUG("stream [%ld] enqueue generate output", streamId());
     enqueueGenerateOutput(prepareGenerateOutput(update_info));
+
+    // Publish finished_ AFTER enqueue so consumer always sees output before FINISHED.
+    // wakeup() is needed because the consumer may have already drained the queue
+    // (woken by enqueue's implicit push) and re-entered waitNotEmpty() before this store.
+    if (is_finished) {
+        finished_.store(true, std::memory_order_release);
+        generate_outputs_queue_.wakeup();
+    }
 
     if (hasError()) {
         return;
