@@ -19,6 +19,20 @@ _ACTIVATION_FUNC_MAP: Dict[ActivationType, Type[nn.Module]] = {
 _GATED_ACTIVATION_TYPE_LIST = [ActivationType.Swiglu]
 
 
+def _make_activation(
+    activation_type: ActivationType, weights: Dict[str, torch.Tensor]
+) -> nn.Module:
+    if activation_type == ActivationType.Swiglu:
+        if W.ffn_w13 in weights:
+            weight = weights[W.ffn_w13]
+            hidden_size = weight.shape[-1] // 2
+        else:
+            weight = weights[W.ffn_w1]
+            hidden_size = weight.shape[-1]
+        return FusedSiluAndMul(hidden_size, weight.dtype, weight.device)
+    return _ACTIVATION_FUNC_MAP[activation_type]()
+
+
 class DenseMLP(nn.Module):
     """
     Unified DenseMLP implementation supporting both SiGLU and GELU activations.
@@ -41,7 +55,7 @@ class DenseMLP(nn.Module):
         self.parallelism_config = parallelism_config
         if self.activation_type not in _ACTIVATION_FUNC_MAP:
             raise ValueError(f"Unsupported activation type: {activation_type}")
-        self.act_fn = _ACTIVATION_FUNC_MAP[activation_type]()
+        self.act_fn = _make_activation(activation_type, weights)
         self.is_gated = activation_type in _GATED_ACTIVATION_TYPE_LIST
 
         if self.is_gated:
