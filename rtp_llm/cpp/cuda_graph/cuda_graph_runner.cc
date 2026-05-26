@@ -254,7 +254,8 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
         }
 
         int last_valid_q = state.current_seq_len;
-        int last_valid_kv = last_valid_q
+        int last_valid_kv =
+            last_valid_q
             + inputs.attention_inputs.prefix_lengths.slice(0, 0, state.current_batch_size).sum().item<int>();
         py_model_inputs_.attention_inputs.cu_seqlens_host.slice(0, state.current_batch_size + 1, max_bs_ + 1)
             .fill_(last_valid_q);
@@ -350,6 +351,18 @@ bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs
 
 bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.canRun");
+
+    // input_embeddings substitutes hidden vectors at locs into combo_tokens after the
+    // embedding lookup. The captured graph has no fixed-shape slot for the embedding
+    // tensors and no way to capture the variable-length Python scatter, so replaying
+    // would silently drop the replacement and produce wrong output. Reject before the
+    // target-verify / prefill / decode branches below so every graph mode falls back
+    // uniformly to the normal forward path for any request that carries input_embeddings.
+    if (inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty()) {
+        RTP_LLM_LOG_DEBUG("cuda graph disabled for request: input_embeddings present");
+        return false;
+    }
+
     // Check if this is speculative sampling:
     // 1. prefix_lengths is not empty
     // 2. all values in input_lengths are the same
@@ -606,9 +619,8 @@ void CudaGraphRunner::initCapture() {
         logCudaGraphPoolMemory("before_capture");
 
         if (is_prefill_cuda_graph_mode_) {
-            RTP_LLM_CHECK_WITH_INFO(
-                isEmbeddingStylePrefillCudaGraph() || isMtpDraftPrefillCudaGraph(),
-                "prefill cuda graph: expected embedding-style or MTP draft layout");
+            RTP_LLM_CHECK_WITH_INFO(isEmbeddingStylePrefillCudaGraph() || isMtpDraftPrefillCudaGraph(),
+                                    "prefill cuda graph: expected embedding-style or MTP draft layout");
             capturePrefill();
         } else {
             captureDecode();
@@ -661,7 +673,7 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         {
             cuda_graph::graphCaptureBegin(graph, shared_graph_pool_);
             cuda_graph::GraphNcclCaptureContext capture_ctx;
-            CudaGraphCaptureGuard capture_guard(&capture_ctx);
+            CudaGraphCaptureGuard               capture_guard(&capture_ctx);
             try {
                 auto py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
                 outputs             = py_outputs_obj.cast<PyModelOutputs>();
