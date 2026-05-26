@@ -294,6 +294,8 @@ class GenericMoeDecoderLayer(nn.Module):
 class GenericMoeModel(GptModelBase):
     """Generic MoE model supporting Qwen3-MoE, internal model, and other MoE architectures."""
 
+    supports_input_embeddings = True
+
     def __init__(
         self,
         model_config: ModelConfig,

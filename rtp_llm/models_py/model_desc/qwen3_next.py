@@ -1015,6 +1015,8 @@ class Qwen3NextDecoderLayer(nn.Module):
 
 
 class Qwen3NextModel(GptModelBase):
+    supports_input_embeddings = True
+
     def __init__(
         self,
         model_config: ModelConfig,

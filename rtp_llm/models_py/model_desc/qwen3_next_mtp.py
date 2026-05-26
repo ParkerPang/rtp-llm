@@ -24,6 +24,8 @@ from rtp_llm.utils.model_weight import W
 
 
 class Qwen3NextMTPModel(GptModelBase):
+    supports_input_embeddings = True
+
     def __init__(
         self,
         model_config: ModelConfig,

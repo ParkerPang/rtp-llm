@@ -17,3 +17,10 @@ py_test (
     exec_properties = {'gpu':'H20'},
 )
 
+py_test (
+    name = "supports_input_embeddings_test",
+    srcs = ["supports_input_embeddings_test.py"],
+    deps = py_test_deps,
+    exec_properties = {'gpu':'H20'},
+)
+

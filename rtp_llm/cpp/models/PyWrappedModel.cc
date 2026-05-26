@@ -57,18 +57,22 @@ void PyWrappedModel::releaseBuffers() {
 }
 
 void PyWrappedModel::attachInputEmbeddings(torch_ext::PyModelInputs& py_inputs, const GptModelInputs& inputs) {
+    // Device-placement contract for input_embeddings:
+    //   - embeddings: CUDA  (owned by NormalModelInputGatherer::gatherInputEmbeddingsForContextBatch)
+    //   - locs:       CPU   (owned by the same gatherer, built via torch::tensor(...))
+    // Here we only assert and forward — no H2D copy — to avoid duplicating the
+    // gatherer's transfer on every step. If you change the gatherer's placement,
+    // update these checks accordingly.
     if (inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty()) {
-        std::vector<torch::Tensor> cuda_embeddings;
-        cuda_embeddings.reserve(inputs.input_embeddings->size());
         for (const auto& emb : inputs.input_embeddings.value()) {
-            cuda_embeddings.push_back(emb.is_cuda() ? emb : emb.cuda());
+            RTP_LLM_CHECK_WITH_INFO(emb.is_cuda(),
+                                    "input_embeddings tensor must be on CUDA; gatherer owns H2D transfer");
         }
-        py_inputs.input_embeddings = std::move(cuda_embeddings);
-        // Keep locs on CPU to avoid device-host sync when Python reads .item()
+        py_inputs.input_embeddings = inputs.input_embeddings.value();
         if (inputs.input_embeddings_locs.defined()) {
-            py_inputs.input_embeddings_locs = inputs.input_embeddings_locs.is_cpu() ?
-                                                  inputs.input_embeddings_locs :
-                                                  inputs.input_embeddings_locs.cpu();
+            RTP_LLM_CHECK_WITH_INFO(inputs.input_embeddings_locs.is_cpu(),
+                                    "input_embeddings_locs must stay on CPU to avoid device-host sync on .item()");
+            py_inputs.input_embeddings_locs = inputs.input_embeddings_locs;
         }
     }
 }

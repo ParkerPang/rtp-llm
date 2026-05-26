@@ -728,6 +728,8 @@ class KimiLinearDecoderLayer(nn.Module):
 
 
 class KimiLinearModel(GptModelBase):
+    supports_input_embeddings = True
+
     def __init__(
         self,
         model_config: ModelConfig,
