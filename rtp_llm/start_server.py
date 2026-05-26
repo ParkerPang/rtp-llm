@@ -28,18 +28,57 @@ setup_logging()
 def normalize_prompt_generator_config(py_env_configs: PyEnvConfigs):
     server_config = py_env_configs.server_config
 
-    if server_config.enable_prompt_generator_mps and not server_config.enable_prompt_generator:
+    if (
+        server_config.enable_prompt_generator_mps
+        and not server_config.enable_prompt_generator
+    ):
         logging.warning(
             "disable prompt generator mps because prompt generator is disabled"
         )
         server_config.enable_prompt_generator_mps = False
 
-    if server_config.enable_prompt_generator and not has_internal_source():
+    if not server_config.enable_prompt_generator:
+        return
+
+    if not has_internal_source():
         logging.warning(
             "prompt generator is unavailable in this build; fallback to frontend server"
         )
         server_config.enable_prompt_generator = False
         server_config.enable_prompt_generator_mps = False
+        return
+
+    # Fail fast at startup if the internal build is broken/incomplete, instead
+    # of crashing later when the service spawns.
+    import importlib
+
+    required = [
+        (
+            "internal_source.rtp_llm.prompt_generator.service.start_server",
+            "start_prompt_generator",
+        ),
+    ]
+    if server_config.enable_prompt_generator_mps:
+        required.append(
+            (
+                "internal_source.rtp_llm.prompt_generator.service.start_mps",
+                "start_mps",
+            )
+        )
+
+    for module_path, symbol in required:
+        try:
+            module = importlib.import_module(module_path)
+        except ImportError as e:
+            raise NotImplementedError(
+                f"prompt generator is enabled and internal_source exists, but "
+                f"{module_path} failed to import: {e}"
+            ) from e
+        if not hasattr(module, symbol):
+            raise NotImplementedError(
+                f"prompt generator is enabled and internal_source exists, but "
+                f"{module_path} does not define {symbol!r}"
+            )
 
 
 def check_server_health(server_port):
@@ -265,7 +304,6 @@ def start_prompt_generator_impl(
 
 def main():
     py_env_configs: PyEnvConfigs = setup_args()
-    normalize_prompt_generator_config(py_env_configs)
     setup_and_configure_server(py_env_configs)
     start_server(py_env_configs)
 
@@ -273,6 +311,7 @@ def main():
 def start_server(py_env_configs: PyEnvConfigs):
     logging.info(f"[PROCESS_START]Start server")
     start_time = time.time()
+    # Sole normalize entry point — cli/serve.py also calls start_server() directly.
     normalize_prompt_generator_config(py_env_configs)
     try:
         multiprocessing.set_start_method("spawn")
