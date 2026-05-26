@@ -106,9 +106,32 @@ class GptModelBase(nn.Module):
 
     @staticmethod
     def apply_input_embeddings(inputs_embeds: Tensor, inputs: PyModelInputs) -> Tensor:
-        if inputs.input_embeddings is not None:
-            for i, emb in enumerate(inputs.input_embeddings):
-                loc = inputs.input_embeddings_locs[i].item()
+        if inputs.input_embeddings is not None and len(inputs.input_embeddings) > 0:
+            embs = inputs.input_embeddings
+            locs = inputs.input_embeddings_locs
+            token_num = inputs_embeds.size(0)
+            hidden_size = inputs_embeds.size(1)
+            if locs is None or locs.numel() != len(embs):
+                raise ValueError(
+                    f"input_embeddings_locs.numel():{0 if locs is None else locs.numel()} "
+                    f"!= input_embeddings count:{len(embs)}"
+                )
+            for i, emb in enumerate(embs):
+                if emb.dim() != 2:
+                    raise ValueError(
+                        f"input_embeddings[{i}] must be 2-D, got dim={emb.dim()}"
+                    )
+                if emb.size(1) != hidden_size:
+                    raise ValueError(
+                        f"input_embeddings[{i}].size(1):{emb.size(1)} != hidden_size:{hidden_size}"
+                    )
+                loc = locs[i].item()
+                if loc < 0:
+                    raise ValueError(f"input_embeddings_locs[{i}]:{loc} must be >= 0")
+                if loc + emb.size(0) > token_num:
+                    raise ValueError(
+                        f"input_embeddings_locs[{i}]:{loc} + rows:{emb.size(0)} > token_num:{token_num}"
+                    )
                 inputs_embeds[loc : loc + emb.size(0)] = emb.to(
                     device=inputs_embeds.device, dtype=inputs_embeds.dtype
                 )

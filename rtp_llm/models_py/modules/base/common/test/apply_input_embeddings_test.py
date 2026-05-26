@@ -97,6 +97,80 @@ class ApplyInputEmbeddingsTest(TestCase):
         expected = emb[0].to(device="cuda", dtype=torch.bfloat16)
         self.assertTrue(torch.equal(result[2], expected))
 
+    # ------------------------------------------------------------------
+    # Bounds / shape validation tests for input_embeddings_locs.
+    # These guard against silent corruption (negative wrap-around, partial
+    # writes from out-of-bound locs, dim-mismatch broadcasts).
+    # ------------------------------------------------------------------
+
+    def test_validation_negative_loc(self):
+        D = self.HIDDEN_DIM
+        inputs_embeds = torch.randn(5, D, dtype=torch.bfloat16)
+        emb = torch.randn(1, D, dtype=torch.bfloat16)
+        inputs = self._make_inputs([emb], [-1])
+        with self.assertRaisesRegex(ValueError, "must be >= 0"):
+            GptModelBase.apply_input_embeddings(inputs_embeds, inputs)
+
+    def test_validation_loc_plus_rows_exceeds_token_num(self):
+        D = self.HIDDEN_DIM
+        inputs_embeds = torch.randn(5, D, dtype=torch.bfloat16)
+        # loc=4, rows=2 -> 4+2=6 > token_num=5
+        emb = torch.randn(2, D, dtype=torch.bfloat16)
+        inputs = self._make_inputs([emb], [4])
+        with self.assertRaisesRegex(ValueError, r"> token_num:5"):
+            GptModelBase.apply_input_embeddings(inputs_embeds, inputs)
+
+    def test_validation_loc_at_token_num_zero_rows_is_invalid_when_rows_positive(self):
+        D = self.HIDDEN_DIM
+        inputs_embeds = torch.randn(5, D, dtype=torch.bfloat16)
+        # loc=5 is past the end; even 1 row overflows.
+        emb = torch.randn(1, D, dtype=torch.bfloat16)
+        inputs = self._make_inputs([emb], [5])
+        with self.assertRaisesRegex(ValueError, r"> token_num:5"):
+            GptModelBase.apply_input_embeddings(inputs_embeds, inputs)
+
+    def test_validation_hidden_size_mismatch(self):
+        D = self.HIDDEN_DIM
+        inputs_embeds = torch.randn(5, D, dtype=torch.bfloat16)
+        # Wrong hidden_size on the embedding tensor.
+        emb = torch.randn(1, D + 1, dtype=torch.bfloat16)
+        inputs = self._make_inputs([emb], [2])
+        with self.assertRaisesRegex(ValueError, r"!= hidden_size"):
+            GptModelBase.apply_input_embeddings(inputs_embeds, inputs)
+
+    def test_validation_embedding_not_2d(self):
+        D = self.HIDDEN_DIM
+        inputs_embeds = torch.randn(5, D, dtype=torch.bfloat16)
+        # 1-D embedding tensor — must be rejected.
+        emb = torch.randn(D, dtype=torch.bfloat16)
+        inputs = self._make_inputs([emb], [2])
+        with self.assertRaisesRegex(ValueError, "must be 2-D"):
+            GptModelBase.apply_input_embeddings(inputs_embeds, inputs)
+
+    def test_empty_embeddings_list_is_noop(self):
+        # input_embeddings=[] without locs should be treated the same as None
+        # (matches the C++ has_value() && !empty() semantics).
+        D = self.HIDDEN_DIM
+        inputs_embeds = torch.randn(5, D, dtype=torch.bfloat16)
+        original = inputs_embeds.clone()
+
+        inputs = PyModelInputs()
+        inputs.input_ids = torch.zeros(1, dtype=torch.int32)
+        inputs.input_embeddings = []
+
+        result = GptModelBase.apply_input_embeddings(inputs_embeds, inputs)
+        self.assertTrue(torch.equal(result, original))
+
+    def test_validation_locs_count_mismatch(self):
+        D = self.HIDDEN_DIM
+        inputs_embeds = torch.randn(5, D, dtype=torch.bfloat16)
+        emb1 = torch.randn(1, D, dtype=torch.bfloat16)
+        emb2 = torch.randn(1, D, dtype=torch.bfloat16)
+        # Two embeddings but only one loc.
+        inputs = self._make_inputs([emb1, emb2], [0])
+        with self.assertRaisesRegex(ValueError, r"!= input_embeddings count:2"):
+            GptModelBase.apply_input_embeddings(inputs_embeds, inputs)
+
 
 if __name__ == "__main__":
     main()
