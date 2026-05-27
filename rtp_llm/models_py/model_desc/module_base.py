@@ -39,17 +39,33 @@ def _inputs_carry_embeddings(inputs: Any) -> bool:
 def _wrap_with_embeddings_guard(method, method_name):
     @functools.wraps(method)
     def wrapper(self, inputs, *args, **kwargs):
-        if not type(self).supports_input_embeddings and _inputs_carry_embeddings(
-            inputs
-        ):
+        cls = type(self)
+        carries = _inputs_carry_embeddings(inputs)
+        # Pre-check: subclass hasn't opted in — reject before forward runs.
+        if carries and not cls.supports_input_embeddings:
             raise NotImplementedError(
-                f"{type(self).__name__}.{method_name}() received input_embeddings "
+                f"{cls.__name__}.{method_name}() received input_embeddings "
                 f"but the model does not opt in (supports_input_embeddings=False). "
                 f"Either set supports_input_embeddings=True on the class and call "
-                f"GptModelBase.apply_input_embeddings() in the forward path, or "
+                f"self.apply_input_embeddings() in the forward path, or "
                 f"reject the request upstream."
             )
-        return method(self, inputs, *args, **kwargs)
+        # Post-check setup: clear the consumed marker so we can detect whether
+        # the forward path actually called apply_input_embeddings(). Catches
+        # subclasses (notably multimodal models) that declare the opt-in but
+        # forget to wire apply_input_embeddings() into forward.
+        if carries:
+            self._input_embeddings_consumed = False
+        result = method(self, inputs, *args, **kwargs)
+        if carries and not getattr(self, "_input_embeddings_consumed", False):
+            raise RuntimeError(
+                f"{cls.__name__}.{method_name}() declared "
+                f"supports_input_embeddings=True but did not call "
+                f"self.apply_input_embeddings() — input_embeddings was silently "
+                f"dropped. Wire apply_input_embeddings() into the forward path, "
+                f"or set supports_input_embeddings=False to reject the request."
+            )
+        return result
 
     return wrapper
 
@@ -60,7 +76,10 @@ class GptModelBase(nn.Module):
     # True. The default False makes any new subclass that forgets to plumb
     # embeddings through fail loudly at the entry — the __init_subclass__
     # wrapper below rejects such requests with NotImplementedError instead of
-    # silently dropping user-supplied data.
+    # silently dropping user-supplied data. Setting True is not enough: the
+    # wrapper also asserts apply_input_embeddings() was actually called in the
+    # forward path, so subclasses (notably multimodal models) that opt in but
+    # forget the call get a RuntimeError instead of a silent drop.
     supports_input_embeddings: bool = False
 
     def __init_subclass__(cls, **kwargs):
@@ -159,8 +178,9 @@ class GptModelBase(nn.Module):
         )
         return fmha_impl
 
-    @staticmethod
-    def apply_input_embeddings(inputs_embeds: Tensor, inputs: PyModelInputs) -> Tensor:
+    def apply_input_embeddings(
+        self, inputs_embeds: Tensor, inputs: PyModelInputs
+    ) -> Tensor:
         if inputs.input_embeddings is not None and len(inputs.input_embeddings) > 0:
             embs = inputs.input_embeddings
             locs = inputs.input_embeddings_locs
@@ -190,6 +210,9 @@ class GptModelBase(nn.Module):
                 inputs_embeds[loc : loc + emb.size(0)] = emb.to(
                     device=inputs_embeds.device, dtype=inputs_embeds.dtype
                 )
+            # Tell the entry wrapper that the embeddings were actually consumed
+            # so the post-condition check passes. See _wrap_with_embeddings_guard.
+            self._input_embeddings_consumed = True
         return inputs_embeds
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:

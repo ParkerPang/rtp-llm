@@ -1,7 +1,12 @@
 """Tests for the GptModelBase input_embeddings guard.
 
-Verifies the __init_subclass__ wrapper that rejects input_embeddings on
-subclasses which haven't opted in via supports_input_embeddings=True.
+Verifies the __init_subclass__ wrapper that:
+  1. Rejects input_embeddings on subclasses which haven't opted in via
+     supports_input_embeddings=True (pre-check before forward runs).
+  2. Asserts opted-in subclasses actually call apply_input_embeddings()
+     during forward, so a multimodal subclass that declares support but
+     forgets the call fails loudly instead of dropping the data
+     (post-check after forward returns).
 """
 
 import types
@@ -35,8 +40,31 @@ class _Unaware(GptModelBase):
         return "micro-ran"
 
 
-class _Aware(GptModelBase):
-    """Subclass that opts in. The wrapper must pass embeddings through."""
+class _AwareAndConsumes(GptModelBase):
+    """Subclass that opts in AND consumes the embeddings."""
+
+    supports_input_embeddings = True
+
+    def __init__(self):
+        nn.Module.__init__(self)
+        self.forward_called = False
+        self.micro_called = False
+
+    def forward(self, inputs: Any) -> str:
+        self.forward_called = True
+        # Stand in for the real apply_input_embeddings(): set the marker that
+        # the entry wrapper's post-check looks for.
+        self._input_embeddings_consumed = True
+        return "forward-ran"
+
+    def forward_micro_batch(self, inputs: List[Any]) -> str:
+        self.micro_called = True
+        self._input_embeddings_consumed = True
+        return "micro-ran"
+
+
+class _AwareButForgets(GptModelBase):
+    """Subclass that opts in but FORGETS to consume — must trigger post-check."""
 
     supports_input_embeddings = True
 
@@ -94,19 +122,53 @@ class SupportsInputEmbeddingsTest(unittest.TestCase):
         self.assertEqual(model.forward_micro_batch(batch), "micro-ran")
         self.assertTrue(model.micro_called)
 
-    # ---- aware subclass: wrapper must NOT reject, even with embeddings ----
+    # ---- aware + consumes: wrapper must NOT reject, even with embeddings ----
 
-    def test_aware_passes_forward_with_embeddings(self):
-        model = _Aware()
+    def test_aware_consumes_forward_with_embeddings(self):
+        model = _AwareAndConsumes()
         inputs = _fake_inputs(input_embeddings=["fake-emb"])
         self.assertEqual(model.forward(inputs), "forward-ran")
         self.assertTrue(model.forward_called)
 
-    def test_aware_passes_forward_micro_batch_with_embeddings(self):
-        model = _Aware()
+    def test_aware_consumes_forward_micro_batch_with_embeddings(self):
+        model = _AwareAndConsumes()
         batch = [_fake_inputs(input_embeddings=["fake-emb"])]
         self.assertEqual(model.forward_micro_batch(batch), "micro-ran")
         self.assertTrue(model.micro_called)
+
+    def test_aware_consumes_forward_runs_when_no_embeddings(self):
+        # No embeddings → post-check is skipped; opt-in subclasses run normally.
+        model = _AwareAndConsumes()
+        self.assertEqual(model.forward(_fake_inputs(None)), "forward-ran")
+        self.assertTrue(model.forward_called)
+
+    # ---- aware but forgets to consume: post-check must reject ----
+
+    def test_aware_but_forgets_raises_on_forward(self):
+        model = _AwareButForgets()
+        inputs = _fake_inputs(input_embeddings=["fake-emb"])
+        with self.assertRaises(RuntimeError) as ctx:
+            model.forward(inputs)
+        msg = str(ctx.exception)
+        self.assertIn("_AwareButForgets.forward", msg)
+        self.assertIn("did not call", msg)
+        self.assertIn("apply_input_embeddings", msg)
+        # forward did execute — the post-check ran after it returned.
+        self.assertTrue(model.forward_called)
+
+    def test_aware_but_forgets_raises_on_forward_micro_batch(self):
+        model = _AwareButForgets()
+        batch = [_fake_inputs(input_embeddings=["fake-emb"])]
+        with self.assertRaises(RuntimeError) as ctx:
+            model.forward_micro_batch(batch)
+        self.assertIn("_AwareButForgets.forward_micro_batch", str(ctx.exception))
+        self.assertTrue(model.micro_called)
+
+    def test_aware_but_forgets_passes_when_no_embeddings(self):
+        # Post-check only fires when inputs actually carry embeddings.
+        model = _AwareButForgets()
+        self.assertEqual(model.forward(_fake_inputs(None)), "forward-ran")
+        self.assertTrue(model.forward_called)
 
     # ---- wrapper idempotency: re-wrapping a subclass must not double-guard ----
 
