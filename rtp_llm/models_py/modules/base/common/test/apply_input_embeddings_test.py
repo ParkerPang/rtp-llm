@@ -1,9 +1,26 @@
 from unittest import SkipTest, TestCase, main
 
 import torch
+from torch import nn
 
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.ops.compute_ops import PyModelInputs
+
+
+class _TestModel(GptModelBase):
+    """Minimal subclass for invoking apply_input_embeddings as an instance method.
+
+    GptModelBase.apply_input_embeddings was made non-static so it can mark
+    self._input_embeddings_consumed for the entry-wrapper post-check. Calling
+    it via the class (GptModelBase.apply_input_embeddings(...)) no longer works
+    — tests must go through an instance. We bypass the heavy GptModelBase
+    __init__ since none of its runtime state matters for the math under test.
+    """
+
+    supports_input_embeddings = True
+
+    def __init__(self):
+        nn.Module.__init__(self)
 
 
 class ApplyInputEmbeddingsTest(TestCase):
@@ -14,6 +31,7 @@ class ApplyInputEmbeddingsTest(TestCase):
             raise SkipTest("CUDA is not available")
         torch.set_default_device("cuda")
         torch.manual_seed(42)
+        self.model = _TestModel()
 
     def _make_inputs(self, embeddings, locs):
         """Helper to build a PyModelInputs with input_embeddings set."""
@@ -32,7 +50,7 @@ class ApplyInputEmbeddingsTest(TestCase):
         emb = torch.randn(1, D, dtype=torch.bfloat16)
         inputs = self._make_inputs([emb], [2])
 
-        result = GptModelBase.apply_input_embeddings(inputs_embeds, inputs)
+        result = self.model.apply_input_embeddings(inputs_embeds, inputs)
 
         self.assertTrue(torch.equal(result[2], emb[0]))
         self.assertTrue(torch.equal(result[0], original[0]))
@@ -49,7 +67,7 @@ class ApplyInputEmbeddingsTest(TestCase):
         emb2 = torch.randn(2, D, dtype=torch.bfloat16)  # loc=3, length=2
         inputs = self._make_inputs([emb1, emb2], [0, 3])
 
-        result = GptModelBase.apply_input_embeddings(inputs_embeds, inputs)
+        result = self.model.apply_input_embeddings(inputs_embeds, inputs)
 
         self.assertTrue(torch.equal(result[0], emb1[0]))
         self.assertTrue(torch.equal(result[3:5], emb2))
@@ -64,7 +82,7 @@ class ApplyInputEmbeddingsTest(TestCase):
 
         inputs = self._make_inputs(None, None)
 
-        result = GptModelBase.apply_input_embeddings(inputs_embeds, inputs)
+        result = self.model.apply_input_embeddings(inputs_embeds, inputs)
 
         self.assertTrue(torch.equal(result, original))
 
@@ -75,7 +93,7 @@ class ApplyInputEmbeddingsTest(TestCase):
         emb = torch.randn(1, D, dtype=torch.float32)  # fp32, should be cast to bf16
         inputs = self._make_inputs([emb], [1])
 
-        result = GptModelBase.apply_input_embeddings(inputs_embeds, inputs)
+        result = self.model.apply_input_embeddings(inputs_embeds, inputs)
 
         self.assertEqual(result.dtype, torch.bfloat16)
         expected = emb[0].to(torch.bfloat16)
@@ -90,7 +108,7 @@ class ApplyInputEmbeddingsTest(TestCase):
         emb = torch.randn(1, D, dtype=torch.float32, device="cpu")
         inputs = self._make_inputs([emb], [2])
 
-        result = GptModelBase.apply_input_embeddings(inputs_embeds, inputs)
+        result = self.model.apply_input_embeddings(inputs_embeds, inputs)
 
         self.assertEqual(result.device.type, "cuda")
         self.assertEqual(result.dtype, torch.bfloat16)
@@ -109,7 +127,7 @@ class ApplyInputEmbeddingsTest(TestCase):
         emb = torch.randn(1, D, dtype=torch.bfloat16)
         inputs = self._make_inputs([emb], [-1])
         with self.assertRaisesRegex(ValueError, "must be >= 0"):
-            GptModelBase.apply_input_embeddings(inputs_embeds, inputs)
+            self.model.apply_input_embeddings(inputs_embeds, inputs)
 
     def test_validation_loc_plus_rows_exceeds_token_num(self):
         D = self.HIDDEN_DIM
@@ -118,7 +136,7 @@ class ApplyInputEmbeddingsTest(TestCase):
         emb = torch.randn(2, D, dtype=torch.bfloat16)
         inputs = self._make_inputs([emb], [4])
         with self.assertRaisesRegex(ValueError, r"> token_num:5"):
-            GptModelBase.apply_input_embeddings(inputs_embeds, inputs)
+            self.model.apply_input_embeddings(inputs_embeds, inputs)
 
     def test_validation_loc_at_token_num_zero_rows_is_invalid_when_rows_positive(self):
         D = self.HIDDEN_DIM
@@ -127,7 +145,7 @@ class ApplyInputEmbeddingsTest(TestCase):
         emb = torch.randn(1, D, dtype=torch.bfloat16)
         inputs = self._make_inputs([emb], [5])
         with self.assertRaisesRegex(ValueError, r"> token_num:5"):
-            GptModelBase.apply_input_embeddings(inputs_embeds, inputs)
+            self.model.apply_input_embeddings(inputs_embeds, inputs)
 
     def test_validation_hidden_size_mismatch(self):
         D = self.HIDDEN_DIM
@@ -136,7 +154,7 @@ class ApplyInputEmbeddingsTest(TestCase):
         emb = torch.randn(1, D + 1, dtype=torch.bfloat16)
         inputs = self._make_inputs([emb], [2])
         with self.assertRaisesRegex(ValueError, r"!= hidden_size"):
-            GptModelBase.apply_input_embeddings(inputs_embeds, inputs)
+            self.model.apply_input_embeddings(inputs_embeds, inputs)
 
     def test_validation_embedding_not_2d(self):
         D = self.HIDDEN_DIM
@@ -145,7 +163,7 @@ class ApplyInputEmbeddingsTest(TestCase):
         emb = torch.randn(D, dtype=torch.bfloat16)
         inputs = self._make_inputs([emb], [2])
         with self.assertRaisesRegex(ValueError, "must be 2-D"):
-            GptModelBase.apply_input_embeddings(inputs_embeds, inputs)
+            self.model.apply_input_embeddings(inputs_embeds, inputs)
 
     def test_empty_embeddings_list_is_noop(self):
         # input_embeddings=[] without locs should be treated the same as None
@@ -158,7 +176,7 @@ class ApplyInputEmbeddingsTest(TestCase):
         inputs.input_ids = torch.zeros(1, dtype=torch.int32)
         inputs.input_embeddings = []
 
-        result = GptModelBase.apply_input_embeddings(inputs_embeds, inputs)
+        result = self.model.apply_input_embeddings(inputs_embeds, inputs)
         self.assertTrue(torch.equal(result, original))
 
     def test_validation_locs_count_mismatch(self):
@@ -169,7 +187,7 @@ class ApplyInputEmbeddingsTest(TestCase):
         # Two embeddings but only one loc.
         inputs = self._make_inputs([emb1, emb2], [0])
         with self.assertRaisesRegex(ValueError, r"!= input_embeddings count:2"):
-            GptModelBase.apply_input_embeddings(inputs_embeds, inputs)
+            self.model.apply_input_embeddings(inputs_embeds, inputs)
 
 
 if __name__ == "__main__":
