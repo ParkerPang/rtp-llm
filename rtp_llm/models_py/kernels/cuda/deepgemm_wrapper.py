@@ -16,6 +16,7 @@ __all__ = [
     "m_grouped_bf16_gemm_nt_contiguous",
     "m_grouped_bf16_gemm_nt_masked",
     "has_deep_gemm",
+    "supports_deep_gemm",
     "is_deep_gemm_e8m0_used",
     "configure_deep_gemm_num_sms",
     "maybe_pack_ue8m0_scale",
@@ -55,8 +56,27 @@ def has_deep_gemm() -> bool:
 
 
 @functools.cache
+def _supports_deep_gemm_device(device_id: int) -> bool:
+    return torch.cuda.get_device_capability(device_id)[0] in (9, 10)
+
+
+def supports_deep_gemm(device_id: Optional[int] = None) -> bool:
+    """Whether DeepGEMM is installed and supports the selected CUDA device."""
+    if not has_deep_gemm() or not torch.cuda.is_available():
+        return False
+    if device_id is None:
+        device_id = torch.cuda.current_device()
+    # The bundled DeepGEMM wheel has sm_90/sm_100 cubins, but no sm_12x
+    # consumer-Blackwell kernels. Keep unsupported devices out of all dense
+    # and MoE strategy selection paths instead of failing at first launch.
+    return _supports_deep_gemm_device(device_id)
+
+
+@functools.cache
 def is_deep_gemm_e8m0_used() -> bool:
-    return torch.cuda.get_device_capability()[0] in [10, 12]
+    # sm_12x consumer Blackwell is served by CudaFp8VllmBlockwiseLinear.
+    # The bundled DeepGEMM wheel does not provide sm_120 cubins.
+    return torch.cuda.get_device_capability()[0] == 10
 
 
 @contextmanager
@@ -95,10 +115,7 @@ def _lazy_init_deep_gemm(symbols: List[str]) -> None:
     # check if the symbols are valid
     if any(symbol not in _deep_gemm_impl_new_map for symbol in symbols):
         raise ValueError(f"Invalid symbols: {symbols}")
-    if all(
-        getattr(globals(), symbol_impl, None) is not None
-        for symbol_impl in symbol_impls
-    ):
+    if all(globals().get(symbol_impl) is not None for symbol_impl in symbol_impls):
         # already initialized
         return
     if not has_deep_gemm():

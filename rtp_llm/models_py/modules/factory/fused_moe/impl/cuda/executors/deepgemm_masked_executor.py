@@ -44,13 +44,13 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         """Check if DeepGemmMaskedExecutor can handle the configuration"""
-        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import has_deep_gemm
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import supports_deep_gemm
         from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
             MoeConfigResolver,
         )
 
         resolver = MoeConfigResolver()
-        checker.check(has_deep_gemm())
+        checker.check(supports_deep_gemm())
         checker.check(resolver.is_bf16(config))
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method in [None, "FP8_PER_BLOCK"])

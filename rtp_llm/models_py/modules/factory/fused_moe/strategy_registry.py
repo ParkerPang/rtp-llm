@@ -71,6 +71,20 @@ class StrategyRegistry:
         logger.debug(f"[StrategyRegistry] Found {len(candidates)} candidate(s)")
 
         if not candidates:
+            from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
+                MoeConfigResolver,
+            )
+            from rtp_llm.models_py.utils.arch import is_sm12x
+
+            if (
+                is_sm12x()
+                and MoeConfigResolver.get_quant_method(config) == "FP8_PER_BLOCK"
+            ):
+                raise ValueError(
+                    "SM12x FP8_PER_BLOCK MoE is not supported yet: the bundled "
+                    "DeepGEMM wheel has no sm12x grouped-GEMM kernels. Use a "
+                    "supported dense model or disable FP8_PER_BLOCK MoE."
+                )
             logger.error(
                 f"No suitable MOE strategy found. Config details: "
                 f"quant_config={config.model_config.quant_config}, "

@@ -9,6 +9,7 @@ from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     fp8_gemm_nt,
     has_deep_gemm,
     is_deep_gemm_e8m0_used,
+    supports_deep_gemm,
 )
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     create_per_token_group_quant_fp8_output_scale,
@@ -45,6 +46,11 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         if weight.dtype not in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
             return False
 
+        # DeepGEMM 2.1.x wheel ships only sm_90/sm_100 cubins. Let sm_12x
+        # consumer Blackwell use the CUTLASS blockwise backend instead.
+        if not supports_deep_gemm():
+            return False
+
         # Check quantization method - handle all other FP8 methods
         quant_method = quant_config.get_method()
         return quant_method == "FP8_PER_BLOCK"
@@ -69,8 +75,18 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         self.bias = bias
 
         # Check if DeepGEMM is available
-        if not has_deep_gemm():
-            error_msg = "DeepGEMM is not available. Please install the `deep_gemm` package to enable DeepGEMM kernels."
+        if not supports_deep_gemm():
+            if not has_deep_gemm():
+                error_msg = (
+                    "DeepGEMM is not available. Please install the `deep_gemm` "
+                    "package to enable DeepGEMM kernels."
+                )
+            else:
+                error_msg = (
+                    "DeepGEMM is unavailable on the current device. The bundled "
+                    "wheel supports sm90/sm100 only; sm12x FP8_PER_BLOCK dense "
+                    "layers use the CUTLASS backend."
+                )
             logger.error(error_msg)
             raise RuntimeError(error_msg)
         # Check weight and weight scale dimensions
@@ -82,20 +98,29 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         if is_deep_gemm_e8m0_used():
             self.N, self.K = self.weight.shape
             self.scale_N, self.scale_K = self.weight_scales.shape
+            if self.weight_scales.dtype is torch.float32 and (
+                (self.N + 127) // 128 != self.scale_N
+                or (self.K + 127) // 128 != self.scale_K
+            ):
+                raise ValueError(
+                    "Weight scale dimension mismatch! float scale "
+                    f"N: {self.N}, scale_N: {self.scale_N}, "
+                    f"K: {self.K}, scale_K: {self.scale_K}"
+                )
         else:
-            # Reshape weight and weight scale
-            self.K, self.N = self.weight.shape
-            self.scale_K, self.scale_N = self.weight_scales.shape
-            self.weight = self.weight.reshape(self.N, self.K)
-            self.weight_scales = self.weight_scales.reshape(self.scale_N, self.scale_K)
+            (
+                self.weight,
+                self.weight_scales,
+                self.K,
+                self.N,
+                self.scale_K,
+                self.scale_N,
+            ) = self._restore_blockwise_weight_layout(
+                self.weight,
+                self.weight_scales,
+                mismatch_label="Weight scale dimension mismatch! float scale",
+            )
         # Check weight scale sizes
-        if self.weight_scales.dtype is torch.float32 and (
-            (self.N + 127) // 128 != self.scale_N
-            or (self.K + 127) // 128 != self.scale_K
-        ):
-            error_msg = f"Weight scale dimension mismatch! float scale N: {self.N}, scale_N: {self.scale_N}, K: {self.K}, scale_K: {self.scale_K}"
-            logger.error(error_msg)
-            raise ValueError(error_msg)
         if self.weight_scales.dtype is torch.int32 and (
             self.N != self.scale_N or (self.K + 511) // 512 != self.scale_K
         ):

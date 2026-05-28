@@ -7,7 +7,9 @@ from typing import Dict, Optional
 
 import torch
 
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 
 from .defs.fused_moe import FusedMoe
 from .strategy_registry import StrategyRegistry
@@ -28,6 +30,13 @@ class FusedMoeFactory:
     @classmethod
     def set_registry(cls, r: StrategyRegistry):
         cls._registry = r
+
+    @classmethod
+    def get_registry(cls) -> StrategyRegistry:
+        """Return the configured production strategy registry as read-only state."""
+        if cls._registry is None:
+            raise RuntimeError("FusedMoeFactory registry has not been configured")
+        return cls._registry
 
     @torch.inference_mode()
     def create_fused_moe(

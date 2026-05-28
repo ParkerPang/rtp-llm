@@ -208,6 +208,8 @@ cc_library(
     }) + select({
         # sm_120 consumer Blackwell (RTX 5090 / RTX PRO 5000) is x86-only;
         # GB200 (cuda12_9_arm) is sm_10x and would trap on this kernel.
+        # Keep this select paired with the ENABLE_FP8_SM120 definition in
+        # .bazelrc's cuda12_9 x86 config: linking and registration must agree.
         "@//:using_cuda12_9_x86": [
             "//rtp_llm/models_py/bindings/cuda/cutlass:fp8_blockwise_sm120_cu",
         ],
