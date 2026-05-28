@@ -350,4 +350,45 @@ TEST_F(QueryConverterTest, testTransInputWithEmbeddingsCountMismatch) {
     EXPECT_THROW(QueryConverter::transQuery(&input), std::exception);
 }
 
+TEST_F(QueryConverterTest, testTransInputRejectsBothMultimodalAndInputEmbeddings) {
+    // input_embeddings 与 multimodal_inputs 同时出现必须被拒绝：两条路径都向
+    // inputs_embeds 写入但没有 loc 重叠检测，混用会静默覆盖。
+    GenerateInputPB input;
+    input.add_token_ids(0);
+    input.add_token_ids(1);
+
+    // 添加 multimodal_inputs
+    auto* mm_input = input.add_multimodal_inputs();
+    mm_input->set_multimodal_url("http://example.com/img.jpg");
+    mm_input->set_multimodal_type(0);
+    mm_input->mutable_mm_preprocess_config();  // 默认值即可
+
+    // 同时添加 input_embeddings
+    auto* input_embeddings_pb = input.mutable_input_embeddings();
+    auto* embedding_pb        = input_embeddings_pb->add_embeddings();
+    embedding_pb->set_data_type(TensorPB::FP32);
+    embedding_pb->add_shape(1);
+    embedding_pb->add_shape(4);
+    std::vector<float> data = {1.0f, 2.0f, 3.0f, 4.0f};
+    embedding_pb->set_fp32_data(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(float));
+    input_embeddings_pb->add_embedding_locs(0);
+
+    EXPECT_THROW(QueryConverter::transQuery(&input), std::exception);
+}
+
+TEST_F(QueryConverterTest, testTransInputAllowsMultimodalAlone) {
+    // multimodal_inputs 单独出现仍然合法 —— 排他性只在与 input_embeddings 共存时生效。
+    GenerateInputPB input;
+    input.add_token_ids(0);
+
+    auto* mm_input = input.add_multimodal_inputs();
+    mm_input->set_multimodal_url("http://example.com/img.jpg");
+    mm_input->set_multimodal_type(0);
+    mm_input->mutable_mm_preprocess_config();
+
+    auto generate_input = QueryConverter::transQuery(&input);
+    ASSERT_TRUE(generate_input->multimodal_inputs.has_value());
+    ASSERT_FALSE(generate_input->input_embeddings.has_value());
+}
+
 }  // namespace rtp_llm

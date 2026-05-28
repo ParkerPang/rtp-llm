@@ -140,6 +140,15 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
 
     // 转换 input_embeddings
     if (input->has_input_embeddings() && input->input_embeddings().embeddings_size() > 0) {
+        // input_embeddings and multimodal_inputs both inject into inputs_embeds via
+        // independent locs (input_embeddings_locs vs mm_locs), and the engine has no
+        // loc-overlap detection. Allowing both in one request risks silent
+        // corruption (one path overwrites the other depending on call order).
+        // Reject upstream so the user gets a clear error instead.
+        RTP_LLM_CHECK_WITH_INFO(input->multimodal_inputs_size() == 0,
+                                "input_embeddings cannot be combined with multimodal_inputs in the same request: "
+                                "both paths write into inputs_embeds and have no loc-overlap detection. "
+                                "Send them in separate requests.");
         const auto& input_embeddings_pb = input->input_embeddings();
         RTP_LLM_CHECK_WITH_INFO(input_embeddings_pb.embeddings_size() == input_embeddings_pb.embedding_locs_size(),
                                 "input_embeddings count (" + std::to_string(input_embeddings_pb.embeddings_size())
