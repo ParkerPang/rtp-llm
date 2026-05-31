@@ -111,6 +111,80 @@ public:
         return static_cast<int>(grouped_layout_.topology().group(tag).kernel_seq_size_per_block);
     }
 
+    LayerKVCache getMultiLayerCache(int layer_id, int layer_num) const {
+        RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "layer_num must be positive, got %d", layer_num);
+        validateLayer(layer_id);
+        validateLayer(layer_id + layer_num - 1);
+
+        const auto& topology = grouped_layout_.topology();
+        const auto& group    = topology.soleGroupForLayer(layer_id);
+        const auto& layout   = grouped_layout_.group(group.tag);
+        for (int offset = 0; offset < layer_num; ++offset) {
+            const int   current_layer = layer_id + offset;
+            const auto& current_group = topology.soleGroupForLayer(current_layer);
+            RTP_LLM_CHECK_WITH_INFO(current_group.tag == group.tag,
+                                    "multi-layer cache crosses groups at layer=%d: expected=%s actual=%s",
+                                    current_layer,
+                                    group.tag.c_str(),
+                                    current_group.tag.c_str());
+            RTP_LLM_CHECK_WITH_INFO(layout.hasLayer(static_cast<size_t>(current_layer)),
+                                    "multi-layer cache tag=%s has no data for layer=%d",
+                                    group.tag.c_str(),
+                                    current_layer);
+        }
+
+        auto make_multi_layer_tensor = [&](bool scale) {
+            const auto select = [scale](const rtp_llm::BlockBufferPtrInfo& buffers) -> const torch::Tensor& {
+                return scale ? buffers.kv_scale_addr : buffers.kv_addr;
+            };
+            const auto& first = select(layout.at(static_cast<size_t>(layer_id)));
+            if (!first.defined()) {
+                for (int offset = 1; offset < layer_num; ++offset) {
+                    RTP_LLM_CHECK_WITH_INFO(!select(layout.at(static_cast<size_t>(layer_id + offset))).defined(),
+                                            "multi-layer cache has inconsistent scale tensors for tag=%s",
+                                            group.tag.c_str());
+                }
+                return torch::Tensor();
+            }
+
+            RTP_LLM_CHECK_WITH_INFO(first.is_contiguous(),
+                                    "multi-layer cache tensor must be contiguous for tag=%s layer=%d",
+                                    group.tag.c_str(),
+                                    layer_id);
+            const auto  bytes_per_layer = static_cast<size_t>(first.numel()) * first.element_size();
+            const auto* first_ptr       = static_cast<const char*>(first.data_ptr());
+            for (int offset = 1; offset < layer_num; ++offset) {
+                const auto& current = select(layout.at(static_cast<size_t>(layer_id + offset)));
+                RTP_LLM_CHECK_WITH_INFO(current.defined() && current.is_contiguous() && current.sizes() == first.sizes()
+                                            && current.scalar_type() == first.scalar_type()
+                                            && current.device() == first.device(),
+                                        "multi-layer cache tensor mismatch for tag=%s layer=%d",
+                                        group.tag.c_str(),
+                                        layer_id + offset);
+                const auto* expected = first_ptr + static_cast<size_t>(offset) * bytes_per_layer;
+                RTP_LLM_CHECK_WITH_INFO(current.data_ptr() == expected,
+                                        "multi-layer cache storage is not contiguous for tag=%s layer=%d",
+                                        group.tag.c_str(),
+                                        layer_id + offset);
+            }
+
+            std::vector<int64_t> shape;
+            shape.reserve(first.dim() + 1);
+            shape.push_back(layer_num);
+            shape.insert(shape.end(), first.sizes().begin(), first.sizes().end());
+            return torch::from_blob(first.data_ptr(), shape, first.options());
+        };
+
+        const int seq_size = group.kernel_seq_size_per_block > 0 ? static_cast<int>(group.kernel_seq_size_per_block) :
+                                                                   static_cast<int>(group.seq_size_per_block);
+        return LayerKVCache(make_multi_layer_tensor(false),
+                            seq_size,
+                            layer_id,
+                            static_cast<int>(topology.groupIdForTag(group.tag)),
+                            group.tag,
+                            make_multi_layer_tensor(true));
+    }
+
 private:
     void validateLayer(int layer_id) const {
         if (layer_id < 0 || static_cast<size_t>(layer_id) >= layerCount()) {
@@ -377,11 +451,11 @@ struct PyMultimodalInputs {
 using AttentionInputsByTag = std::map<std::string, PyAttentionInputs>;
 
 struct PyModelInputs {
-    torch::Tensor                             input_ids;
-    torch::Tensor                             input_hiddens;
-    torch::Tensor                             combo_position_ids;
-    PyEmbeddingInputs                         embedding_inputs;
-    PyMultimodalInputs                        multimodal_inputs;
+    torch::Tensor      input_ids;
+    torch::Tensor      input_hiddens;
+    torch::Tensor      combo_position_ids;
+    PyEmbeddingInputs  embedding_inputs;
+    PyMultimodalInputs multimodal_inputs;
     // C++ common/single-group fast path. Python sees this field through a
     // property which returns either this object or attention_inputs_by_tag.
     PyAttentionInputs                         attention_inputs;
@@ -397,10 +471,17 @@ struct PyModelInputs {
 
 struct PyModelOutputs {
     torch::Tensor hidden_states;
+    torch::Tensor last_hidden_states;
+    torch::Tensor logits;
 
     PyModelOutputs() = default;
 
     PyModelOutputs(torch::Tensor hidden_states): hidden_states(std::move(hidden_states)) {}
+
+    PyModelOutputs(torch::Tensor hidden_states, torch::Tensor last_hidden_states, torch::Tensor logits):
+        hidden_states(std::move(hidden_states)),
+        last_hidden_states(std::move(last_hidden_states)),
+        logits(std::move(logits)) {}
 };
 
 void registerPyOpDefs(pybind11::module& m);

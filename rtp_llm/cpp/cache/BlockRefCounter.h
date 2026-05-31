@@ -37,18 +37,12 @@ public:
     }
 
     void decrementRefCounter(const std::vector<int>& block_indices) {
-        for (int index : block_indices) {
-            auto& counter = ref_counter[index];
-            if (counter == 0) {
-                RTP_LLM_FAIL("block:%d decrease zero ref count.", index);
-                return;
-            } else {
-                counter--;
-                if (counter == 0) {
-                    busy_block_num_--;
-                }
-            }
-        }
+        decrementRefCounterImpl<false>(block_indices);
+    }
+
+    std::vector<int> decrementRefCounterWithFreeInfo(const std::vector<int>& block_indices) {
+        auto free_block = decrementRefCounterImpl<true>(block_indices);
+        return free_block;
     }
 
     uint32_t busyBlockNum() const {
@@ -57,6 +51,32 @@ public:
 
     uint32_t freeBlockNum() const {
         return total_block_nums_ - busy_block_num_;
+    }
+
+private:
+    template<bool with_free_info>
+    std::vector<int> decrementRefCounterImpl(const std::vector<int>& block_indices) {
+        std::vector<int> free_blocks;
+        if constexpr (with_free_info) {
+            free_blocks.reserve(block_indices.size());
+        }
+
+        for (int index : block_indices) {
+            auto& counter = ref_counter[index];
+            if (counter == 0) {
+                RTP_LLM_FAIL("block:%d decrease zero ref count.", index);
+                return {};
+            } else {
+                counter--;
+                if (counter == 0) {
+                    if constexpr (with_free_info) {
+                        free_blocks.push_back(index);
+                    }
+                    busy_block_num_--;
+                }
+            }
+        }
+        return free_blocks;
     }
 
 private:

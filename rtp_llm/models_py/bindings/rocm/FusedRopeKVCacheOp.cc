@@ -139,19 +139,21 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
         if (!prefix_lengths.is_cuda()) {
             prefix_lengths = prefix_lengths.to(torch::kCUDA, /*non_blocking=*/false, /*copy=*/true);
         }
-        attn_params->prefix_lengths = prefix_lengths.contiguous();
+        attn_params->prefix_lengths    = prefix_lengths.contiguous();
+        attn_params->max_prefix_length = prefix_lengths.max().item<int>();
     } else {
-        attn_params->prefix_lengths = attn_inputs.prefix_lengths;
+        attn_params->prefix_lengths    = attn_inputs.prefix_lengths;
+        attn_params->max_prefix_length = 0;
     }
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
-    attn_params->position_ids = attn_inputs.combo_position_ids;
+    attn_params->position_ids              = attn_inputs.combo_position_ids;
 
-// Ensure position_ids is on CUDA device (e.g., MROPE position_ids may be on CPU)
+    // Ensure position_ids is on CUDA device (e.g., MROPE position_ids may be on CPU)
     if (attn_params->position_ids.defined() && !attn_params->position_ids.is_cuda()) {
         attn_params->position_ids =
             attn_params->position_ids.to(torch::kCUDA, /*non_blocking=*/false, /*copy=*/true).contiguous();
     }
-    
+
     int max_prefix_length = 0;
     if (has_prefix && attn_params->prefix_lengths.defined() && attn_params->prefix_lengths.numel() > 0) {
         max_prefix_length = attn_params->prefix_lengths.max().item<int32_t>();
@@ -398,6 +400,12 @@ CKAttnPtr FusedRopeKVCacheDecodeOpBase::prepare(torch_ext::PyAttentionInputs att
             attn_params->position_ids.to(torch::kCUDA, /*non_blocking=*/false, /*copy=*/true).contiguous();
     }
 
+    if (attn_inputs.prefix_lengths.defined() && attn_inputs.prefix_lengths.numel() > 0) {
+        attn_params->max_prefix_length = attn_inputs.prefix_lengths.max().item<int>();
+    } else {
+        attn_params->max_prefix_length = 0;
+    }
+
     if (attn_inputs.kv_cache_kernel_block_id_device.defined()
         && attn_inputs.kv_cache_kernel_block_id_device.numel() > 0) {
         attn_params->kv_cache_kernel_block_id_device = attn_inputs.kv_cache_kernel_block_id_device;
@@ -431,10 +439,8 @@ torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&        
     prefix_prompt_param.kv_block_array = kv_block_array;
 
     // 设置 prefix_lengths 参数
-    int max_prefix_length = 0;
-    if (params->prefix_lengths.defined() && params->prefix_lengths.size(0) > 0) {
-        max_prefix_length = params->prefix_lengths.max().item<int>();
-
+    int max_prefix_length = params->max_prefix_length;
+    if (max_prefix_length > 0) {
         int* prefix_lengths_ptr = params->prefix_lengths.data_ptr<int>();
         if (prefix_lengths_ptr == nullptr) {
             throw std::runtime_error("FusedRopeKVCacheDecodeOp: prefix_lengths data pointer is null");

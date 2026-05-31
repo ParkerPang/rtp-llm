@@ -503,4 +503,11 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
     # 解析参数（会自动应用所有配置绑定）
     parser.parse_args(args)
 
+    # DISABLE_ACCESS_LOG is a process-wide setting. Keep the legacy VitConfig
+    # consumer in sync with the canonical miscellaneous config without
+    # registering the same command-line option twice.
+    py_env_configs.vit_config.disable_access_log = (
+        py_env_configs.misc_config.misc_config.disable_access_log
+    )
+
     return py_env_configs

@@ -92,7 +92,7 @@ TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable)
     query->generate_config                       = make_shared<GenerateConfig>();
     query->generate_config->num_return_sequences = 2;
     GenerateStreamPtr stream =
-        make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr, 0, true);
 
     BatchKVCacheResource resource;
     resource.resetBatchSize(2);

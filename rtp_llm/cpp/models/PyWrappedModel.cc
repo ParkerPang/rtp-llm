@@ -612,6 +612,11 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
+        if (py_model_outputs.logits.defined() && py_model_outputs.logits.numel() > 0) {
+            return GptModelOutputs{std::move(py_model_outputs.logits),
+                                   std::move(py_model_outputs.last_hidden_states),
+                                   std::move(py_model_outputs.hidden_states)};
+        }
         const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
         if (device_props_.enable_prefill_cp && has_context_request) {
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);

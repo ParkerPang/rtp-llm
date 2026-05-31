@@ -71,7 +71,16 @@ cc_library(
             "@local_config_rocm//rocm:rocm",
         ],
         "//conditions:default": [],
-    }),
+        }),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "stl_utils",
+    hdrs = [
+        "StlUtil.h",
+    ],
     copts = copts(),
     visibility = ["//visibility:public"],
 )
