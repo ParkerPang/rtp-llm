@@ -132,8 +132,6 @@ class BertModel(GptModelBase):
     def forward(
         self, inputs: PyModelInputs, fmha_impl: FMHAImplBase = None
     ) -> PyModelOutputs:
-        # input_embeddings rejection is enforced by GptModelBase
-        # (supports_input_embeddings defaults to False on BertModel).
         input_ids: torch.Tensor = inputs.input_ids
         bert_embedding_inputs = inputs.bert_embedding_inputs
         inputs_embeds = self.embed_tokens(

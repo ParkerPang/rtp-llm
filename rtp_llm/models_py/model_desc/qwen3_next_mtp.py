@@ -24,7 +24,6 @@ from rtp_llm.utils.model_weight import W
 
 
 class Qwen3NextMTPModel(GptModelBase):
-    supports_input_embeddings = True
 
     def __init__(
         self,
@@ -89,8 +88,7 @@ class Qwen3NextMTPModel(GptModelBase):
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
-        inputs_embeds = self.embed_tokens(input_ids)
-        inputs_embeds = self.apply_input_embeddings(inputs_embeds, inputs)
+        inputs_embeds = self.get_inputs_embeds(input_ids, inputs)
         last_hidden_states = inputs.input_hiddens
         e_norm = self.pre_fc_norm_embedding(inputs_embeds)
         h_norm = self.pre_fc_norm_hidden(last_hidden_states)

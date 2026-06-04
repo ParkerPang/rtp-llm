@@ -1015,7 +1015,6 @@ class Qwen3NextDecoderLayer(nn.Module):
 
 
 class Qwen3NextModel(GptModelBase):
-    supports_input_embeddings = True
 
     def __init__(
         self,
@@ -1125,8 +1124,7 @@ class Qwen3NextModel(GptModelBase):
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
-        inputs_embeds = self.embed_tokens(input_ids)
-        inputs_embeds = self.apply_input_embeddings(inputs_embeds, inputs)
+        inputs_embeds = self.get_inputs_embeds(input_ids, inputs)
         hidden_states = inputs_embeds
 
         attention_inputs: PyAttentionInputs = inputs.attention_inputs

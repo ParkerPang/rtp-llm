@@ -49,7 +49,6 @@ private:
     torch_ext::PyAttentionInputs   buildPyAttentionInputs(const GptModelInputs& inputs);
     torch_ext::BertEmbeddingInputs buildBertEmbeddingInputs(const GptModelInputs& inputs);
     void setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs, const GptModelInputs& inputs);
-    void attachInputEmbeddings(torch_ext::PyModelInputs& py_inputs, const GptModelInputs& inputs);
     GptModelOutputs callForwardPostLayers(torch::Tensor         hidden_states,
                                           const GptModelInputs& inputs,
                                           bool                  skip_final_layernorm,

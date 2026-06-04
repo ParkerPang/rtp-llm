@@ -352,12 +352,6 @@ bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs
 bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.canRun");
 
-    // input_embeddings substitutes hidden vectors at locs into combo_tokens after the
-    // embedding lookup. The captured graph has no fixed-shape slot for the embedding
-    // tensors and no way to capture the variable-length Python scatter, so replaying
-    // would silently drop the replacement and produce wrong output. Reject before the
-    // target-verify / prefill / decode branches below so every graph mode falls back
-    // uniformly to the normal forward path for any request that carries input_embeddings.
     if (inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty()) {
         RTP_LLM_LOG_DEBUG("cuda graph disabled for request: input_embeddings present");
         return false;

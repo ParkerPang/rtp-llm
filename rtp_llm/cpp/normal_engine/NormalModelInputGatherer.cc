@@ -141,9 +141,8 @@ void gatherMultimodalFeaturesForContextBatch(const GenerateStreamPtr&    stream,
     memcpy(ctx.merged_text_mask + ctx.token_idx, text_token_mask.data(), text_token_mask.size() * sizeof(int));
 }
 
-// Sole H2D owner for input_embeddings. Downstream consumers (e.g.
-// PyWrappedModel::attachInputEmbeddings) assert the CUDA placement and
-// forward without copying — keep that invariant if you change this.
+// Sole H2D owner for input_embeddings. Downstream consumers assert CUDA
+// placement and forward without copying — keep that invariant if you change this.
 void gatherInputEmbeddingsForContextBatch(const GenerateStreamPtr&       stream,
                                           const GatherModelInputContext& ctx,
                                           std::vector<torch::Tensor>&    gathered_input_embeddings,

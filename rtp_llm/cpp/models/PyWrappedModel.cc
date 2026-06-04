@@ -56,27 +56,6 @@ void PyWrappedModel::releaseBuffers() {
     buffer_holder_.release();
 }
 
-void PyWrappedModel::attachInputEmbeddings(torch_ext::PyModelInputs& py_inputs, const GptModelInputs& inputs) {
-    // Device-placement contract for input_embeddings:
-    //   - embeddings: CUDA  (owned by NormalModelInputGatherer::gatherInputEmbeddingsForContextBatch)
-    //   - locs:       CPU   (owned by the same gatherer, built via torch::tensor(...))
-    // Here we only assert and forward — no H2D copy — to avoid duplicating the
-    // gatherer's transfer on every step. If you change the gatherer's placement,
-    // update these checks accordingly.
-    if (inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty()) {
-        for (const auto& emb : inputs.input_embeddings.value()) {
-            RTP_LLM_CHECK_WITH_INFO(emb.is_cuda(),
-                                    "input_embeddings tensor must be on CUDA; gatherer owns H2D transfer");
-        }
-        py_inputs.input_embeddings = inputs.input_embeddings.value();
-        if (inputs.input_embeddings_locs.defined()) {
-            RTP_LLM_CHECK_WITH_INFO(inputs.input_embeddings_locs.is_cpu(),
-                                    "input_embeddings_locs must stay on CPU to avoid device-host sync on .item()");
-            py_inputs.input_embeddings_locs = inputs.input_embeddings_locs;
-        }
-    }
-}
-
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
@@ -362,10 +341,10 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         torch::Tensor input_hiddens =
             inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
         auto py_model_input = PyModelInputs{token_ids, input_hiddens, py_attn_inputs, bert_embedding_inputs};
-        // When input_embeddings is present, planMicroBatches() returns disabled,
-        // so micro_inputs here is the unsplit full inputs (i == 0 only).
-        // Safe to attach without coordinate remapping.
-        attachInputEmbeddings(py_model_input, micro_inputs);
+        if (micro_inputs.input_embeddings.has_value() && !micro_inputs.input_embeddings->empty()) {
+            py_model_input.input_embeddings      = micro_inputs.input_embeddings;
+            py_model_input.input_embeddings_locs = micro_inputs.input_embeddings_locs;
+        }
         input_list.emplace_back(std::move(py_model_input));
     }
 
@@ -476,7 +455,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         fusedCopy(d2d_copies_);
 
         auto py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs, bert_embedding_inputs});
-        attachInputEmbeddings(py_model_inputs, inputs);
+        if (inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty()) {
+            py_model_inputs.input_embeddings      = inputs.input_embeddings;
+            py_model_inputs.input_embeddings_locs = inputs.input_embeddings_locs;
+        }
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
