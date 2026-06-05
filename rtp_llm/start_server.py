@@ -278,7 +278,7 @@ def start_prompt_generator_impl(
                 process = multiprocessing.Process(
                     target=start_prompt_generator,
                     args=(py_env_configs, rank, i, global_controller),
-                    name=f"prompt_generator_{i}",
+                    name=f"prompt_generator_rank{rank}_server{i}",
                 )
                 prompt_processes.append(process)
                 process.start()
