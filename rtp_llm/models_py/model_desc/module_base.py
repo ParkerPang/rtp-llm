@@ -109,8 +109,14 @@ class GptModelBase(nn.Module):
         inputs_embeds = self.embed_tokens(input_ids)
         if inputs.input_embeddings is not None and len(inputs.input_embeddings) > 0:
             locs = inputs.input_embeddings_locs
+            token_num = inputs_embeds.size(0)
             for i, emb in enumerate(inputs.input_embeddings):
                 loc = locs[i].item()
+                assert loc >= 0, f"input_embeddings_locs[{i}]={loc} must be >= 0"
+                assert loc + emb.size(0) <= token_num, (
+                    f"input_embeddings[{i}] at loc {loc} with length {emb.size(0)} "
+                    f"exceeds token count {token_num}"
+                )
                 inputs_embeds[loc : loc + emb.size(0)] = emb.to(
                     device=inputs_embeds.device, dtype=inputs_embeds.dtype
                 )

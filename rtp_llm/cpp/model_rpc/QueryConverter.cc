@@ -164,10 +164,22 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
         }
 
         // 转换 embedding_locs
+        int32_t token_ids_size = generate_input->input_ids.size(0);
         embedding_locs.resize(input_embeddings_pb.embedding_locs_size());
         memcpy(embedding_locs.data(),
                input_embeddings_pb.embedding_locs().data(),
                input_embeddings_pb.embedding_locs_size() * sizeof(int32_t));
+
+        for (int i = 0; i < (int)embedding_locs.size(); i++) {
+            int32_t loc     = embedding_locs[i];
+            int32_t emb_len = embeddings[i].size(0);
+            RTP_LLM_CHECK_WITH_INFO(loc >= 0 && loc + emb_len <= token_ids_size,
+                                    "input_embeddings_locs[%d]=%d with emb length %d out of range [0, %d)",
+                                    i,
+                                    loc,
+                                    emb_len,
+                                    token_ids_size);
+        }
 
         generate_input->input_embeddings      = embeddings;
         generate_input->input_embeddings_locs = embedding_locs;
