@@ -31,6 +31,7 @@ public:
     }
 
     ~NormalGenerateStream() {
+        finished_.store(true, std::memory_order_release);
         generate_outputs_queue_.wakeup();
     }
 
