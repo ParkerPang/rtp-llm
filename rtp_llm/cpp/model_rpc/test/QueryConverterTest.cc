@@ -195,8 +195,11 @@ TEST_F(QueryConverterTest, TransTensorPB_UnsupportedType) {
 
 TEST_F(QueryConverterTest, testTransInputWithInputEmbeddings_FP32) {
     GenerateInputPB input;
-    input.add_token_ids(0);
-    input.add_token_ids(1);
+    // Need enough tokens so that embedding_locs + emb_length <= token_ids_size
+    // emb1: loc=5, length=2 => need >=7; emb2: loc=10, length=1 => need >=11
+    for (int i = 0; i < 12; ++i) {
+        input.add_token_ids(i);
+    }
 
     // 创建 input_embeddings
     auto* input_embeddings_pb = input.mutable_input_embeddings();
@@ -262,7 +265,10 @@ TEST_F(QueryConverterTest, testTransInputWithInputEmbeddings_FP32) {
 
 TEST_F(QueryConverterTest, testTransInputWithInputEmbeddings_FP16) {
     GenerateInputPB input;
-    input.add_token_ids(0);
+    // Need enough tokens: loc=3, emb_length=2 => need >=5
+    for (int i = 0; i < 5; ++i) {
+        input.add_token_ids(i);
+    }
 
     // 创建 input_embeddings (FP16)
     auto* input_embeddings_pb = input.mutable_input_embeddings();
@@ -291,7 +297,10 @@ TEST_F(QueryConverterTest, testTransInputWithInputEmbeddings_FP16) {
 
 TEST_F(QueryConverterTest, testTransInputWithInputEmbeddings_BF16) {
     GenerateInputPB input;
-    input.add_token_ids(0);
+    // Need enough tokens: loc=2, emb_length=1 => need >=3
+    for (int i = 0; i < 3; ++i) {
+        input.add_token_ids(i);
+    }
 
     // 创建 input_embeddings (BF16)
     auto* input_embeddings_pb = input.mutable_input_embeddings();
