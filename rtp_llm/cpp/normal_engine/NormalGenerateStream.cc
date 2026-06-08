@@ -3,23 +3,38 @@
 namespace rtp_llm {
 
 ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput() {
-    // Use finished_ (atomic, set by updateOutput) instead of getStatus() (state-machine,
-    // transitions only in next schedule() call) to avoid 1-second waitNotEmpty() stall.
-    while ((!hasError()) && !finished_.load(std::memory_order_acquire) && generate_outputs_queue_.isEmpty()) {
+    // Use a dedicated CV (output_notify_cv_) so the "is-queue-empty?" check and
+    // the wait happen under the same lock.  The old pattern used SynchronizedQueue's
+    // isEmpty() + waitNotEmpty() which are two independent lock acquisitions; a
+    // push()+signal() landing between them caused a missed signal and a full
+    // DEF_WAIT_TIME (1 s) stall.
+    GenerateOutputs output;
+    while (!hasError() && !finished_.load(std::memory_order_acquire)) {
+        if (generate_outputs_queue_.tryGetAndPopFront(output)) {
+            return output;
+        }
         checkTimeout();
-        generate_outputs_queue_.waitNotEmpty();
+        std::unique_lock<std::mutex> lk(output_notify_mutex_);
+        if (!generate_outputs_queue_.isEmpty()) {
+            continue;
+        }
+        output_notify_cv_.wait_for(lk, std::chrono::seconds(1));
     }
     if (hasError()) {
         return statusInfo();
     }
-    if (generate_outputs_queue_.isEmpty()) {
-        if (finished_.load(std::memory_order_acquire) || isFinished()) {
-            return ErrorInfo(ErrorCode::FINISHED, "finished");
-        } else {
-            return ErrorInfo(ErrorCode::OUTPUT_QUEUE_IS_EMPTY, "output queue is empty");
-        }
+    if (generate_outputs_queue_.tryGetAndPopFront(output)) {
+        return output;
     }
-    return generate_outputs_queue_.getAndPopFront();
+    if (finished_.load(std::memory_order_acquire) || isFinished()) {
+        return ErrorInfo(ErrorCode::FINISHED, "finished");
+    }
+    return ErrorInfo(ErrorCode::OUTPUT_QUEUE_IS_EMPTY, "output queue is empty");
+}
+
+void NormalGenerateStream::notifyOutputReady() {
+    std::lock_guard<std::mutex> lk(output_notify_mutex_);
+    output_notify_cv_.notify_one();
 }
 
 bool NormalGenerateStream::hasOutput() {
@@ -153,6 +168,7 @@ void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs&& generate_resu
     } else {
         generate_outputs_queue_.push(std::move(generate_results));
     }
+    notifyOutputReady();
 }
 
 void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
@@ -212,6 +228,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         // Finished but no new tokens to enqueue — publish finished_ and wake consumer.
         if (is_finished) {
             finished_.store(true, std::memory_order_release);
+            notifyOutputReady();
             generate_outputs_queue_.wakeup();
         }
         return;
@@ -221,10 +238,9 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     enqueueGenerateOutput(prepareGenerateOutput(update_info));
 
     // Publish finished_ AFTER enqueue so consumer always sees output before FINISHED.
-    // wakeup() is needed because the consumer may have already drained the queue
-    // (woken by enqueue's implicit push) and re-entered waitNotEmpty() before this store.
     if (is_finished) {
         finished_.store(true, std::memory_order_release);
+        notifyOutputReady();
         generate_outputs_queue_.wakeup();
     }
 
