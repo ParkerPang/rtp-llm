@@ -118,8 +118,8 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     TRANS_OPTIONAL(force_batch);
 
     // 生成式推荐：组合 token 约束
-    generate_config->combo_token_size = config_proto->combo_token_size();
-    generate_config->enable_cross_sequence_ban = config_proto->enable_cross_sequence_ban();
+    generate_config->combo_token_size              = config_proto->combo_token_size();
+    generate_config->enable_cross_sequence_ban     = config_proto->enable_cross_sequence_ban();
     generate_config->cross_seq_diverge_start_combo = config_proto->cross_seq_diverge_start_combo();
     for (const auto& combo_proto : config_proto->banned_combo_token_ids().rows()) {
         std::vector<int> combo;
@@ -415,8 +415,18 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
 
     stackBuffersToTensorPB(flatten_output->mutable_logits(), source_outputs, [](const auto& r) { return r.logits; });
 
-    stackBuffersToTensorPB(
-        flatten_output->mutable_all_hidden_states(), source_outputs, [](const auto& r) { return r.all_hidden_states; });
+    {
+        torch::Tensor all_hidden_states;
+        for (const auto& resp : source_outputs) {
+            if (resp.all_hidden_states.has_value()) {
+                all_hidden_states = resp.all_hidden_states.value();
+                break;
+            }
+        }
+        if (all_hidden_states.defined()) {
+            transTensorPB(flatten_output->mutable_all_hidden_states(), all_hidden_states.contiguous());
+        }
+    }
 
     if (!source_outputs.empty() && source_outputs[0].prompt_logits.has_value()) {
         auto*       pb = flatten_output->mutable_prompt_logits();
