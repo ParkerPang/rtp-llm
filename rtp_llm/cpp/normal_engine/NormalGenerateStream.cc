@@ -77,7 +77,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
                     device_->clone({update_info.hidden_states->view(i, 1), rtp_llm::AllocationType::HOST});
             }
         }
-        if (emit_all_hidden_states) {
+        if (emit_all_hidden_states && i == 0) {
             generate_output.all_hidden_states = first_all_hidden_states_;
         }
         if (loss_) {

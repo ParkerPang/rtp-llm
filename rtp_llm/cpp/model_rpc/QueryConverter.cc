@@ -477,8 +477,14 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
 
     stackBuffersToTensorPB(flatten_output->mutable_logits(), source_outputs, [](const auto& r) { return r.logits; });
 
-    stackBuffersToTensorPB(
-        flatten_output->mutable_all_hidden_states(), source_outputs, [](const auto& r) { return r.all_hidden_states; });
+    // all_hidden_states only has one copy (prefill shared across beams), take the first non-null
+    for (const auto& resp : source_outputs) {
+        if (resp.all_hidden_states.has_value()) {
+            QueryConverter::transTensorPB(flatten_output->mutable_all_hidden_states(),
+                                          resp.all_hidden_states.value().get());
+            break;
+        }
+    }
 
     RTP_LLM_LOG_DEBUG("transResponse done");
 }
