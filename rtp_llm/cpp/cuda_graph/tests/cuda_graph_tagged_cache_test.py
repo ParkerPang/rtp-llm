@@ -48,11 +48,12 @@ def _tag_attention_inputs(
     return tagged
 
 
-def _build_decode_inputs(
+def _build_runner_inputs(
     tags: list[str],
     values: dict[str, int],
     batch_size: int = 2,
     is_target_verify: bool = False,
+    is_prefill: bool = False,
 ) -> PyModelInputs:
     inputs = PyModelInputs()
     inputs.input_ids = torch.arange(batch_size, dtype=torch.int32, device="cuda")
@@ -61,14 +62,24 @@ def _build_decode_inputs(
     )
 
     attention_inputs = PyAttentionInputs()
-    attention_inputs.is_prefill = False
+    attention_inputs.is_prefill = is_prefill
     attention_inputs.is_target_verify = is_target_verify
     attention_inputs.dtype = get_typemeta(torch.zeros(1, dtype=torch.bfloat16))
-    attention_inputs.prefix_lengths = torch.empty(0, dtype=torch.int32)
+    # is_prefill selects the runner mode. Target verification uses prefill-shaped
+    # host metadata because tryGetRealGraphDecodeBatchSize derives its batch key
+    # from populated prefix lengths; the former decode-shaped fixture did not
+    # represent production target-verify inputs.
+    attention_inputs.prefix_lengths = (
+        torch.zeros(batch_size, dtype=torch.int32).pin_memory()
+        if is_target_verify
+        else torch.empty(0, dtype=torch.int32)
+    )
     attention_inputs.input_lengths = torch.ones(batch_size, dtype=torch.int32)
-    attention_inputs.sequence_lengths = torch.ones(
-        batch_size, dtype=torch.int32
-    ).pin_memory()
+    attention_inputs.sequence_lengths = (
+        torch.empty(0, dtype=torch.int32).pin_memory()
+        if is_target_verify
+        else torch.ones(batch_size, dtype=torch.int32).pin_memory()
+    )
     attention_inputs.sequence_lengths_plus_1_device = torch.full(
         (batch_size,), 2, dtype=torch.int32, device="cuda"
     )
@@ -159,19 +170,19 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
 
         self._assert_replay_signature(
             runner,
-            _build_decode_inputs(GROUP_TAGS, {"full": 2, "aux": 1}),
+            _build_runner_inputs(GROUP_TAGS, {"full": 2, "aux": 1}),
             18,
         )
         self._assert_replay_signature(
             runner,
-            _build_decode_inputs(GROUP_TAGS, {"full": 5, "aux": 3}),
+            _build_runner_inputs(GROUP_TAGS, {"full": 5, "aux": 3}),
             53,
         )
 
-        self.assertFalse(runner.canRun(_build_decode_inputs(["full"], {"full": 2})))
+        self.assertFalse(runner.canRun(_build_runner_inputs(["full"], {"full": 2})))
         self.assertFalse(
             runner.canRun(
-                _build_decode_inputs(
+                _build_runner_inputs(
                     ["full", "aux", "extra"],
                     {"full": 2, "aux": 1, "extra": 9},
                 )
@@ -179,7 +190,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         )
         self.assertFalse(
             runner.canRun(
-                _build_decode_inputs(["full", "wrong"], {"full": 2, "wrong": 1})
+                _build_runner_inputs(["full", "wrong"], {"full": 2, "wrong": 1})
             )
         )
 
@@ -206,6 +217,45 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             _build_prefill_inputs(GROUP_TAGS, {"full": 4, "aux": 3}),
             52,
         )
+
+    def test_multimodal_inputs_fall_back_from_cuda_graph(self) -> None:
+        decode_runner = CudaGraphRunner()
+        decode_runner.init_decode(
+            TaggedBlockTableModel(),
+            HIDDEN_SIZE,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [2],
+            GROUP_TAGS,
+        )
+        decode_inputs = _build_runner_inputs(GROUP_TAGS, {"full": 2, "aux": 1})
+        self.assertTrue(decode_runner.canRun(decode_inputs))
+        decode_inputs.multimodal_inputs.multimodal_features = [
+            torch.ones((1, HIDDEN_SIZE), dtype=torch.bfloat16, device="cuda")
+        ]
+        decode_inputs.multimodal_inputs.mm_features_locs = torch.tensor(
+            [0], dtype=torch.int32
+        )
+        self.assertFalse(decode_runner.canRun(decode_inputs))
+
+        prefill_runner = CudaGraphRunner()
+        prefill_runner.init_prefill(
+            TaggedBlockTableModel(),
+            2,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [4],
+            HIDDEN_SIZE,
+            GROUP_TAGS,
+        )
+        prefill_inputs = _build_prefill_inputs(GROUP_TAGS, {"full": 2, "aux": 1})
+        self.assertTrue(prefill_runner.canRun(prefill_inputs))
+        prefill_inputs.multimodal_inputs.mm_extra_input = [
+            torch.ones((1, HIDDEN_SIZE), dtype=torch.bfloat16, device="cuda")
+        ]
+        self.assertFalse(prefill_runner.canRun(prefill_inputs))
 
     def test_duplicate_capture_tag_is_rejected(self) -> None:
         runner = CudaGraphRunner()
@@ -235,18 +285,38 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             True,
         )
 
-        valid = _build_decode_inputs(
-            GROUP_TAGS, {"full": 2, "aux": 1}, is_target_verify=True
+        valid = _build_runner_inputs(
+            GROUP_TAGS,
+            {"full": 2, "aux": 1},
+            is_target_verify=True,
+            is_prefill=True,
         )
         self.assertTrue(runner.canRun(valid))
 
-        missing = _build_decode_inputs(["full"], {"full": 2}, is_target_verify=True)
+        multimodal = _build_runner_inputs(
+            GROUP_TAGS,
+            {"full": 2, "aux": 1},
+            is_target_verify=True,
+            is_prefill=True,
+        )
+        multimodal.multimodal_inputs.multimodal_features = [
+            torch.ones((1, HIDDEN_SIZE), dtype=torch.bfloat16, device="cuda")
+        ]
+        multimodal.multimodal_inputs.mm_features_locs = torch.tensor(
+            [0], dtype=torch.int32
+        )
+        self.assertFalse(runner.canRun(multimodal))
+
+        missing = _build_runner_inputs(
+            ["full"], {"full": 2}, is_target_verify=True, is_prefill=True
+        )
         self.assertFalse(runner.canRun(missing))
 
-        wrong = _build_decode_inputs(
+        wrong = _build_runner_inputs(
             ["full", "wrong"],
             {"full": 2, "wrong": 1},
             is_target_verify=True,
+            is_prefill=True,
         )
         self.assertFalse(runner.canRun(wrong))
 

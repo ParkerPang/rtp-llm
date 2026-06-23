@@ -6,6 +6,7 @@
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/FallbackLogUtils.h"
 #include "torch/csrc/autograd/generated/variable_factories.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 using namespace torch_ext;
@@ -442,10 +443,10 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs& inputs, const 
     size_t      copy_numel            = 0;
     const auto& captured_position_ids = graph_it->second.mem_hold_.py_model_inputs_.combo_position_ids;
     if (!validateComboPositionIds(inputs, state, captured_position_ids, copy_numel)) {
-        const uint64_t fallback_count = combo_position_fallback_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+        const auto [fallback_count, should_log] = recordRateLimitedFallback(combo_position_fallback_count_);
         // Log the first fallback and then at powers of two. This keeps the
         // decode hot path quiet while retaining a monotonic, observable count.
-        if ((fallback_count & (fallback_count - 1)) == 0) {
+        if (should_log) {
             RTP_LLM_LOG_WARNING(
                 "combo_position_ids are incompatible with CUDA graph key %d: factor=%d, src_numel=%lld, "
                 "dst_numel=%lld; fallback to normal run (fallback_count=%llu)",
@@ -462,6 +463,11 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs& inputs, const 
 
 bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.canRun");
+    if (!enable_cuda_graph_) {
+        return false;
+    }
+    const bool has_multimodal_inputs =
+        !inputs.multimodal_inputs.multimodal_features.empty() || !inputs.multimodal_inputs.mm_extra_input.empty();
     if (kv_cache_group_tags_.size() > 1) {
         if (inputs.attention_inputs_by_tag.size() != kv_cache_group_tags_.size()) {
             RTP_LLM_LOG_WARNING("Tagged kv cache size mismatch: inputs=%zu, captured=%zu, fallback to normal run.",
@@ -485,6 +491,16 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
     // 2. all values in input_lengths are the same
     // this is for 2.2.1
     if (is_target_verify_) {
+        if (has_multimodal_inputs) {
+            const auto [fallback_count, should_log] = recordRateLimitedFallback(multimodal_fallback_count_);
+            if (should_log) {
+                RTP_LLM_LOG_WARNING(
+                    "multimodal target-verify inputs require eager Python processing; fallback from CUDA graph "
+                    "(multimodal_fallback_count=%llu)",
+                    static_cast<unsigned long long>(fallback_count));
+            }
+            return false;
+        }
         if (inputs.attention_inputs.is_target_verify) {
             // Target-verify must also respect captured decode range.
             // Otherwise we may replay an uncaptured graph key.
@@ -493,7 +509,20 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
         return false;
     }
 
-    if (!enable_cuda_graph_ || (inputs.attention_inputs.is_prefill && !is_prefill_cuda_graph_mode_)) {
+    if (inputs.attention_inputs.is_prefill && !is_prefill_cuda_graph_mode_) {
+        return false;
+    }
+
+    // Only count traffic that otherwise targets this runner mode. A prefill request
+    // presented to a decode-only runner already falls back for the mode mismatch.
+    if (has_multimodal_inputs) {
+        const auto [fallback_count, should_log] = recordRateLimitedFallback(multimodal_fallback_count_);
+        if (should_log) {
+            RTP_LLM_LOG_WARNING("multimodal inputs require eager Python processing; fallback from CUDA graph. "
+                                "If this is normal traffic for this graph mode, disable that CUDA graph mode to "
+                                "reclaim capture memory (multimodal_fallback_count=%llu)",
+                                static_cast<unsigned long long>(fallback_count));
+        }
         return false;
     }
 
