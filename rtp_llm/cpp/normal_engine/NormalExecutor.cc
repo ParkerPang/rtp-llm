@@ -1,10 +1,15 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include <algorithm>
 #include <cstdlib>
+#include <list>
 #include <memory>
+#include <string>
+#include <vector>
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
@@ -14,6 +19,66 @@
 using namespace std;
 
 namespace rtp_llm {
+
+namespace {
+
+bool envTruthy(const char* value) {
+    if (value == nullptr) {
+        return false;
+    }
+    const std::string v(value);
+    return v == "1" || v == "true" || v == "TRUE" || v == "yes" || v == "YES" || v == "on" || v == "ON";
+}
+
+bool fanoutTraceEnabled() {
+    static const bool enabled = envTruthy(std::getenv("RTP_LLM_FANOUT_TRACE"));
+    return enabled;
+}
+
+int64_t fanoutForwardThresholdUs() {
+    static const int64_t threshold_us = []() -> int64_t {
+        const char* value = std::getenv("RTP_LLM_FANOUT_TRACE_FORWARD_THRESHOLD_US");
+        if (value == nullptr) {
+            return 0;
+        }
+        return std::max<int64_t>(0, std::atoll(value));
+    }();
+    return threshold_us;
+}
+
+bool shouldTraceForward(int64_t model_forward_us) {
+    const int64_t threshold_us = fanoutForwardThresholdUs();
+    return fanoutTraceEnabled() || (threshold_us > 0 && model_forward_us >= threshold_us);
+}
+
+std::vector<int64_t> streamIds(const std::list<GenerateStreamPtr>& streams) {
+    std::vector<int64_t> ids;
+    ids.reserve(streams.size());
+    for (const auto& stream : streams) {
+        ids.emplace_back(stream->streamId());
+    }
+    return ids;
+}
+
+std::vector<int> inputLens(const std::list<GenerateStreamPtr>& streams) {
+    std::vector<int> lens;
+    lens.reserve(streams.size());
+    for (const auto& stream : streams) {
+        lens.emplace_back(stream->inputLength());
+    }
+    return lens;
+}
+
+std::vector<int64_t> batchGroupIds(const std::list<GenerateStreamPtr>& streams) {
+    std::vector<int64_t> ids;
+    ids.reserve(streams.size());
+    for (const auto& stream : streams) {
+        ids.emplace_back(stream->batchGroupId());
+    }
+    return ids;
+}
+
+}  // namespace
 
 NormalExecutor::ModelFactory NormalExecutor::test_model_factory = nullptr;
 
@@ -173,6 +238,27 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         expert_balancer_->stepForward(*model_, executor_collector);
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+    }
+    if (tp_rank_ == 0 && streams.size() > 0 && shouldTraceForward(executor_collector.model_forward_us)) {
+        const auto stream_ids      = streamIds(streams);
+        const auto input_lens      = inputLens(streams);
+        const auto batch_group_ids = batchGroupIds(streams);
+        RTP_LLM_LOG_INFO("[be.forward] forward_done_ts_us=%ld streams=%s input_lens=%s batch_group_ids=%s "
+                         "stream_count=%zu ctx_batch=%zu gen_batch=%zu execute_tokens=%zu max_seq=%zu "
+                         "gather_us=%ld tp_sync_us=%ld model_forward_us=%ld eplb_us=%ld",
+                         autil::TimeUtility::currentTimeInMicroSeconds(),
+                         vectorToString(stream_ids).c_str(),
+                         vectorToString(input_lens).c_str(),
+                         vectorToString(batch_group_ids).c_str(),
+                         streams.size(),
+                         stream_groups.totalContextBatchSize(),
+                         stream_groups.totalDecodeBatchSize(),
+                         stream_groups.modelExecuteTokenSize(),
+                         stream_groups.maxSeqLen(),
+                         executor_collector.gather_model_input_us,
+                         executor_collector.tp_sync_input_us,
+                         executor_collector.model_forward_us,
+                         executor_collector.eplb_step_latency_us);
     }
 
     if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {

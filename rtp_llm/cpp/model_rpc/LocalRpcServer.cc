@@ -1,10 +1,14 @@
 #include <memory>
 #include <chrono>
+#include <cstdlib>
+#include <string>
+#include <vector>
 #include <c10/core/InferenceMode.h>
 #include <pybind11/pybind11.h>
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
@@ -15,6 +19,59 @@
 using namespace std;
 
 namespace rtp_llm {
+
+namespace {
+
+bool envTruthy(const char* value) {
+    if (value == nullptr) {
+        return false;
+    }
+    const std::string v(value);
+    return v == "1" || v == "true" || v == "TRUE" || v == "yes" || v == "YES" || v == "on" || v == "ON";
+}
+
+bool fanoutTraceEnabled() {
+    static const bool enabled = envTruthy(std::getenv("RTP_LLM_FANOUT_TRACE"));
+    return enabled;
+}
+
+std::vector<int64_t> requestIdsFromBatch(const BatchGenerateInputPB* request) {
+    std::vector<int64_t> request_ids;
+    request_ids.reserve(request->inputs_size());
+    for (int i = 0; i < request->inputs_size(); ++i) {
+        request_ids.emplace_back(request->inputs(i).request_id());
+    }
+    return request_ids;
+}
+
+std::vector<int64_t> requestIdsFromInputs(const std::vector<std::shared_ptr<GenerateInput>>& inputs) {
+    std::vector<int64_t> request_ids;
+    request_ids.reserve(inputs.size());
+    for (const auto& input : inputs) {
+        request_ids.emplace_back(input->request_id);
+    }
+    return request_ids;
+}
+
+std::vector<int> inputLensFromInputs(const std::vector<std::shared_ptr<GenerateInput>>& inputs) {
+    std::vector<int> input_lens;
+    input_lens.reserve(inputs.size());
+    for (const auto& input : inputs) {
+        input_lens.emplace_back(input->inputLength());
+    }
+    return input_lens;
+}
+
+std::vector<int64_t> batchGroupIdsFromInputs(const std::vector<std::shared_ptr<GenerateInput>>& inputs) {
+    std::vector<int64_t> batch_group_ids;
+    batch_group_ids.reserve(inputs.size());
+    for (const auto& input : inputs) {
+        batch_group_ids.emplace_back(input->batch_group_id);
+    }
+    return batch_group_ids;
+}
+
+}  // namespace
 
 grpc::Status LocalRpcServer::init(const EngineInitParams&                       maga_init_params,
                                   std::unique_ptr<ProposeModelEngineInitParams> propose_params,
@@ -198,8 +255,18 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
     RTP_LLM_PROFILE_SCOPE("rpc.batch_generate_call");
     c10::InferenceMode inference_guard(true);
     AtomicGuard        request_guard(onflight_requests_);
-    const int          batch_size = request->inputs_size();
+    const int          batch_size     = request->inputs_size();
+    const bool         fanout_trace   = fanoutTraceEnabled();
+    const int64_t      rpc_recv_ts_us = autil::TimeUtility::currentTimeInMicroSeconds();
     RTP_LLM_LOG_INFO("receive batch generate request, batch_size=%d", batch_size);
+    if (fanout_trace) {
+        const auto request_ids = requestIdsFromBatch(request);
+        RTP_LLM_LOG_INFO("[be.recv] recv_ts_us=%ld batch_size=%d request_ids=%s peer=%s",
+                         rpc_recv_ts_us,
+                         batch_size,
+                         vectorToString(request_ids).c_str(),
+                         context->peer().c_str());
+    }
 
     if (batch_size == 0) {
         return grpc::Status::OK;
@@ -227,11 +294,39 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         }
         inputs.push_back(input);
     }
+    if (fanout_trace) {
+        const auto request_ids     = requestIdsFromInputs(inputs);
+        const auto input_lens      = inputLensFromInputs(inputs);
+        const auto batch_group_ids = batchGroupIdsFromInputs(inputs);
+        RTP_LLM_LOG_INFO("[be.prepared] recv_ts_us=%ld prepare_done_ts_us=%ld batch_size=%d request_ids=%s "
+                         "input_lens=%s batch_group_ids=%s force_batch=%d batch_group_size=%d timeout_ms=%d",
+                         rpc_recv_ts_us,
+                         autil::TimeUtility::currentTimeInMicroSeconds(),
+                         batch_size,
+                         vectorToString(request_ids).c_str(),
+                         vectorToString(input_lens).c_str(),
+                         vectorToString(batch_group_ids).c_str(),
+                         inputs.empty() ? 0 : int(inputs[0]->generate_config->force_batch),
+                         inputs.empty() ? 0 : inputs[0]->batch_group_size,
+                         inputs.empty() ? 0 : inputs[0]->generate_config->batch_group_timeout.value_or(-1));
+    }
 
     // batchEnqueue contract: returned vector is 1:1 with `inputs` (same size, same order).
     // Streams that failed checkInputLength carry an error reported via reportError() and surface
     // it through collectStreamOutput → nextOutput → ErrorInfo path below.
-    auto streams = engine_->batchEnqueue(inputs);
+    const int64_t enqueue_start_ts_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    auto          streams             = engine_->batchEnqueue(inputs);
+    if (fanout_trace) {
+        const auto request_ids = requestIdsFromInputs(inputs);
+        RTP_LLM_LOG_INFO("[be.enqueued] recv_ts_us=%ld enqueue_done_ts_us=%ld batch_size=%d request_ids=%s "
+                         "enqueue_us=%ld stream_count=%zu",
+                         rpc_recv_ts_us,
+                         autil::TimeUtility::currentTimeInMicroSeconds(),
+                         batch_size,
+                         vectorToString(request_ids).c_str(),
+                         autil::TimeUtility::currentTimeInMicroSeconds() - enqueue_start_ts_us,
+                         streams.size());
+    }
 
     // collectStreamOutput is currently SERIAL: streams[0] must finish before streams[1] is drained.
     // For batch decode this is bounded (all streams advance together), but TODO: parallelize for
@@ -256,6 +351,16 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         }
     }
 
+    if (fanout_trace) {
+        const auto request_ids = requestIdsFromInputs(inputs);
+        RTP_LLM_LOG_INFO(
+            "[be.response] recv_ts_us=%ld response_ts_us=%ld batch_size=%d request_ids=%s rpc_total_us=%ld",
+            rpc_recv_ts_us,
+            autil::TimeUtility::currentTimeInMicroSeconds(),
+            batch_size,
+            vectorToString(request_ids).c_str(),
+            autil::TimeUtility::currentTimeInMicroSeconds() - rpc_recv_ts_us);
+    }
     RTP_LLM_LOG_INFO("batch generate done, batch_size=%d", batch_size);
     return grpc::Status::OK;
 }

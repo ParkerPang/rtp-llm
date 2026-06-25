@@ -6,11 +6,86 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include <chrono>
+#include <cstdlib>
+#include <list>
 #include <memory>
 #include <mutex>
+#include <string>
+#include <vector>
 
 using namespace std;
 namespace rtp_llm {
+
+namespace {
+
+bool envTruthy(const char* value) {
+    if (value == nullptr) {
+        return false;
+    }
+    const std::string v(value);
+    return v == "1" || v == "true" || v == "TRUE" || v == "yes" || v == "YES" || v == "on" || v == "ON";
+}
+
+bool fanoutTraceEnabled() {
+    static const bool enabled = envTruthy(std::getenv("RTP_LLM_FANOUT_TRACE"));
+    return enabled;
+}
+
+std::vector<int64_t> streamIds(const std::vector<GenerateStreamPtr>& streams) {
+    std::vector<int64_t> ids;
+    ids.reserve(streams.size());
+    for (const auto& stream : streams) {
+        ids.emplace_back(stream->streamId());
+    }
+    return ids;
+}
+
+std::vector<int64_t> streamIds(const std::list<GenerateStreamPtr>& streams) {
+    std::vector<int64_t> ids;
+    ids.reserve(streams.size());
+    for (const auto& stream : streams) {
+        ids.emplace_back(stream->streamId());
+    }
+    return ids;
+}
+
+std::vector<int> inputLens(const std::vector<GenerateStreamPtr>& streams) {
+    std::vector<int> lens;
+    lens.reserve(streams.size());
+    for (const auto& stream : streams) {
+        lens.emplace_back(stream->inputLength());
+    }
+    return lens;
+}
+
+std::vector<int> inputLens(const std::list<GenerateStreamPtr>& streams) {
+    std::vector<int> lens;
+    lens.reserve(streams.size());
+    for (const auto& stream : streams) {
+        lens.emplace_back(stream->inputLength());
+    }
+    return lens;
+}
+
+std::vector<int64_t> batchGroupIds(const std::vector<GenerateStreamPtr>& streams) {
+    std::vector<int64_t> ids;
+    ids.reserve(streams.size());
+    for (const auto& stream : streams) {
+        ids.emplace_back(stream->batchGroupId());
+    }
+    return ids;
+}
+
+std::vector<int64_t> batchGroupIds(const std::list<GenerateStreamPtr>& streams) {
+    std::vector<int64_t> ids;
+    ids.reserve(streams.size());
+    for (const auto& stream : streams) {
+        ids.emplace_back(stream->batchGroupId());
+    }
+    return ids;
+}
+
+}  // namespace
 
 FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_config,
                              const ModelConfig&                     model_config,
@@ -98,6 +173,8 @@ absl::Status FIFOScheduler::enqueue(const GenerateStreamPtr& stream) {
 
 std::vector<std::shared_ptr<GenerateStream>> FIFOScheduler::batchEnqueue(const vector<GenerateStreamPtr>& streams) {
     RTP_LLM_PROFILE_FUNCTION();
+    const bool    fanout_trace       = fanoutTraceEnabled();
+    const int64_t enqueue_call_ts_us = autil::TimeUtility::currentTimeInMicroSeconds();
     // Preserve 1:1 correspondence with the caller's input vector: failing streams are still
     // returned (already marked errored by checkInputLength via reportError) but only valid ones
     // enter the waiting queue.
@@ -108,10 +185,42 @@ std::vector<std::shared_ptr<GenerateStream>> FIFOScheduler::batchEnqueue(const v
             stream_enqueued.emplace_back(stream);
         }
     }
+    size_t waiting_before = 0;
+    size_t waiting_after  = 0;
+    size_t running_before = 0;
+    size_t loading_before = 0;
     {
         std::lock_guard<std::mutex> lock(lock_);
+        if (fanout_trace) {
+            waiting_before = waiting_streams_.size();
+            running_before = running_streams_.size();
+            loading_before = loading_cache_streams_.size();
+        }
         waiting_streams_.insert(waiting_streams_.end(), stream_enqueued.begin(), stream_enqueued.end());
         schedule_trigger_ = true;
+        if (fanout_trace) {
+            waiting_after = waiting_streams_.size();
+        }
+    }
+    if (fanout_trace) {
+        const auto request_ids        = streamIds(streams);
+        const auto enqueued_ids       = streamIds(stream_enqueued);
+        const auto request_input_lens = inputLens(streams);
+        const auto request_group_ids  = batchGroupIds(streams);
+        RTP_LLM_LOG_INFO("[be.scheduler_enqueue] enqueue_ts_us=%ld request_count=%zu valid_count=%zu request_ids=%s "
+                         "valid_request_ids=%s input_lens=%s batch_group_ids=%s waiting_before=%zu waiting_after=%zu "
+                         "running_before=%zu loading_before=%zu",
+                         enqueue_call_ts_us,
+                         streams.size(),
+                         stream_enqueued.size(),
+                         vectorToString(request_ids).c_str(),
+                         vectorToString(enqueued_ids).c_str(),
+                         vectorToString(request_input_lens).c_str(),
+                         vectorToString(request_group_ids).c_str(),
+                         waiting_before,
+                         waiting_after,
+                         running_before,
+                         loading_before);
     }
     cond_.notify_all();
     return streams;
@@ -284,7 +393,12 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
         cond_.wait(lock, [this] { return waitPredicate(); });
     }
 
-    schedule_trigger_ = false;
+    schedule_trigger_            = false;
+    const bool    fanout_trace   = fanoutTraceEnabled();
+    const size_t  waiting_before = waiting_streams_.size();
+    const size_t  running_before = running_streams_.size();
+    const size_t  loading_before = loading_cache_streams_.size();
+    const int64_t schedule_ts_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
     // LOADING_CACHE -> DONE/WAITING: error / load cache done
     evaluateAndUpdateStreams(loading_cache_streams_);
@@ -304,6 +418,25 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     size_t prev_waiting_size = waiting_streams_.size();
     evaluateWaitingStreams(waiting_streams_);
     evaluateAndUpdateStreams(waiting_streams_);
+    if (fanout_trace && !new_streams_.empty()) {
+        const auto scheduled_ids        = streamIds(new_streams_);
+        const auto scheduled_input_lens = inputLens(new_streams_);
+        const auto scheduled_group_ids  = batchGroupIds(new_streams_);
+        RTP_LLM_LOG_INFO("[be.scheduler_run] schedule_ts_us=%ld scheduled_count=%zu scheduled_ids=%s input_lens=%s "
+                         "batch_group_ids=%s waiting_before=%zu waiting_after=%zu running_before=%zu "
+                         "running_after=%zu loading_before=%zu loading_after=%zu",
+                         schedule_ts_us,
+                         new_streams_.size(),
+                         vectorToString(scheduled_ids).c_str(),
+                         vectorToString(scheduled_input_lens).c_str(),
+                         vectorToString(scheduled_group_ids).c_str(),
+                         waiting_before,
+                         waiting_streams_.size(),
+                         running_before,
+                         running_streams_.size() + new_streams_.size(),
+                         loading_before,
+                         loading_cache_streams_.size());
+    }
     running_streams_.insert(running_streams_.end(), new_streams_.begin(), new_streams_.end());
     new_streams_.clear();
 
