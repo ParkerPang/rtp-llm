@@ -62,7 +62,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
         loss_ = torch::zeros({(int64_t)inputLength() - 1}, torch::kFloat32);
     }
     if (generate_input_->generate_config->return_softmax_probs) {
-        softmax_probs_ = torch::zeros({(int64_t)init_batch_size, (int64_t)max_seq_len_}, torch::kFloat32);
+        softmax_probs_ = torch::zeros({(int64_t)maxBatchSize(), (int64_t)max_seq_len_}, torch::kFloat32);
     }
     if (generate_input_->generate_config->return_all_hidden_states) {
         setReturnLastHiddenStates(true);
@@ -822,16 +822,30 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     const auto& new_tokens     = update_info.new_tokens;
     auto        num_new_tokens = update_info.num_new_tokens;
 
-    int error_token_id = 0;
-    if (!complete_token_ids_->update(new_tokens,
-                                     begin_time_us_,
-                                     num_new_tokens,
-                                     generate_input_->inputLength(),
-                                     maxTokenNum(),
-                                     vocab_size_,
-                                     hasNumBeams(),
-                                     streamId(),
-                                     error_token_id)) {
+    int  error_token_id = 0;
+    bool update_success = false;
+    if (hasNumBeams() && update_info.src_batch_indices.defined() && new_tokens.size(1) == num_new_tokens) {
+        update_success = complete_token_ids_->updateBeamTokens(new_tokens,
+                                                               update_info.src_batch_indices,
+                                                               begin_time_us_,
+                                                               num_new_tokens,
+                                                               generate_input_->inputLength(),
+                                                               maxTokenNum(),
+                                                               vocab_size_,
+                                                               streamId(),
+                                                               error_token_id);
+    } else {
+        update_success = complete_token_ids_->update(new_tokens,
+                                                     begin_time_us_,
+                                                     num_new_tokens,
+                                                     generate_input_->inputLength(),
+                                                     maxTokenNum(),
+                                                     vocab_size_,
+                                                     hasNumBeams(),
+                                                     streamId(),
+                                                     error_token_id);
+    }
+    if (!update_success) {
         reportEventWithoutLock(StreamEvents::Error,
                                ErrorCode::OUT_OF_VOCAB_RANGE,
                                "output token id:" + std::to_string(error_token_id)

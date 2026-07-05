@@ -169,4 +169,62 @@ TEST_F(GenerateStreamTest, testInputEmbeddingsDisableTokenOnlyReuseCache) {
     ASSERT_FALSE(stream->enableRemoteCache());
 }
 
+TEST_F(GenerateStreamTest, testUpdateBeamTokensReordersPrefixAndAppendsNewToken) {
+    auto generate_input             = std::make_shared<GenerateInput>();
+    generate_input->generate_config = std::make_shared<GenerateConfig>();
+    generate_input->input_ids       = torch::tensor(std::vector<int32_t>{1, 2}, torch::kInt32);
+
+    CompleteTokenIds complete_token_ids(/*batch_size=*/1,
+                                        /*max_batch_size=*/2,
+                                        /*max_seq_len=*/8,
+                                        /*seq_size_per_block=*/4);
+    complete_token_ids.init(generate_input);
+
+    int error_token_id = 0;
+    ASSERT_TRUE(
+        complete_token_ids.updateBeamTokens(torch::tensor(std::vector<int32_t>{10, 11}, torch::kInt32).reshape({2, 1}),
+                                            torch::tensor(std::vector<int32_t>{0, 0}, torch::kInt32),
+                                            /*begin_time_us=*/0,
+                                            /*num_new_tokens=*/1,
+                                            /*input_length=*/2,
+                                            /*max_token_num=*/8,
+                                            /*vocab_size=*/100,
+                                            /*stream_id=*/0,
+                                            error_token_id));
+    ASSERT_EQ(complete_token_ids.completeTokenIdsVec(0), (std::vector<int>{1, 2, 10}));
+    ASSERT_EQ(complete_token_ids.completeTokenIdsVec(1), (std::vector<int>{1, 2, 11}));
+
+    ASSERT_TRUE(
+        complete_token_ids.updateBeamTokens(torch::tensor(std::vector<int32_t>{20, 21}, torch::kInt32).reshape({2, 1}),
+                                            torch::tensor(std::vector<int32_t>{1, 0}, torch::kInt32),
+                                            /*begin_time_us=*/0,
+                                            /*num_new_tokens=*/1,
+                                            /*input_length=*/2,
+                                            /*max_token_num=*/8,
+                                            /*vocab_size=*/100,
+                                            /*stream_id=*/0,
+                                            error_token_id));
+    ASSERT_EQ(complete_token_ids.completeTokenIdsVec(0), (std::vector<int>{1, 2, 11, 20}));
+    ASSERT_EQ(complete_token_ids.completeTokenIdsVec(1), (std::vector<int>{1, 2, 10, 21}));
+}
+
+TEST_F(GenerateStreamTest, testCompleteTokenIdsCapsCapacityByRequestMaxNewTokensAndInitializesAllRows) {
+    auto generate_input                             = std::make_shared<GenerateInput>();
+    generate_input->generate_config                 = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->max_new_tokens = 3;
+    generate_input->input_ids                       = torch::tensor(std::vector<int32_t>{7, 8}, torch::kInt32);
+
+    CompleteTokenIds complete_token_ids(/*batch_size=*/1,
+                                        /*max_batch_size=*/2,
+                                        /*max_seq_len=*/128,
+                                        /*seq_size_per_block=*/4);
+    complete_token_ids.init(generate_input, /*extra_reserve_token_num=*/2);
+
+    ASSERT_EQ(complete_token_ids.tokenDim(), 7);
+    ASSERT_EQ(complete_token_ids.data(0)[0], 7);
+    ASSERT_EQ(complete_token_ids.data(0)[1], 8);
+    ASSERT_EQ(complete_token_ids.data(1)[0], 7);
+    ASSERT_EQ(complete_token_ids.data(1)[1], 8);
+}
+
 }  // namespace rtp_llm

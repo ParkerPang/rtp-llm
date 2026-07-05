@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <vector>
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "torch/all.h"
 
@@ -35,6 +36,15 @@ public:
                 bool                 is_beam_search,
                 int64_t              stream_id,
                 int&                 error_token_id);
+    bool updateBeamTokens(const torch::Tensor& new_tokens,
+                          const torch::Tensor& src_batch_indices,
+                          int64_t              begin_time_us,
+                          int                  num_new_tokens,
+                          int                  input_length,
+                          int                  max_token_num,
+                          int                  vocab_size,
+                          int64_t              stream_id,
+                          int&                 error_token_id);
     void copyTokensTo(int batch_id, void* dst, int offset, size_t token_num);
 
     int  seqLength() const;
@@ -73,7 +83,8 @@ private:
     int64_t first_token_time_us_    = 0;
     int64_t first_token_latency_us_ = 0;
 
-    torch::Tensor complete_token_ids_;
+    torch::Tensor        complete_token_ids_;
+    std::vector<int32_t> reorder_buffer_;
 };
 
 using CompleteTokenIdsPtr = std::shared_ptr<CompleteTokenIds>;

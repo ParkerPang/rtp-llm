@@ -117,7 +117,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
                 generate_output.aux_info.softmax_probs =
                     softmax_probs_[i].narrow(0, last_output_pos_, output_len).clone();
             }
-            if (update_info.cum_log_probs.defined()) {
+            if (returnCumLogProbs() && cum_log_probs_.defined()) {
                 generate_output.aux_info.cum_log_probs = cum_log_probs_.narrow(0, i, 1).cpu().clone();
             }
             if (generate_input_->generate_config->return_all_probs != ReturnAllProbsMode::NONE) {
@@ -180,6 +180,15 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     if (generate_input_->generate_config->return_softmax_probs && update_info.softmax_probs.defined()) {
         RTP_LLM_CHECK(update_info.softmax_probs.dim() == 2);
         RTP_LLM_CHECK(update_info.softmax_probs.size(1) == update_info.num_new_tokens);
+        if (update_info.src_batch_indices.defined() && softmax_probs_.defined()) {
+            const int history_len = seqLength() - update_info.num_new_tokens - inputLength();
+            if (history_len > 0) {
+                auto history_probs = softmax_probs_.narrow(1, inputLength(), history_len);
+                auto src_indices   = update_info.src_batch_indices.to(
+                    torch::TensorOptions().dtype(torch::kLong).device(history_probs.device()), true);
+                history_probs.copy_(history_probs.index_select(0, src_indices));
+            }
+        }
         setSoftmaxProbs(update_info.softmax_probs, seqLength() - update_info.num_new_tokens);
     }
 
@@ -188,7 +197,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         reportEventWithoutLock(StreamEvents::GenerateDone);
         fillSubGenerateStatus(StreamState::FINISHED);
     }
-    if (update_info.cum_log_probs.defined()) {
+    if (update_info.cum_log_probs.defined() && (!finished_ || returnCumLogProbs())) {
         cum_log_probs_ = update_info.cum_log_probs.cpu();
     }
     if (update_info.all_probs.defined()) {

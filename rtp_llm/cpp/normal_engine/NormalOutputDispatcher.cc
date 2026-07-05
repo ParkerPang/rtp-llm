@@ -16,17 +16,14 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     const auto&  sampler_output       = merge_outputs.sampler_output;
     const size_t total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
     RTP_LLM_CHECK(total_batch_size_out == (size_t)sampler_output.token_ids.size(0));
-    // token_ids and success may be CUDA tensors (Sampler keeps them on GPU to avoid D2H sync during sampling).
-    // Move to CPU once here so dispatchSingleStream can use data_ptr safely.
-    const torch::Tensor token_ids_cpu =
-        sampler_output.token_ids.defined() ? sampler_output.token_ids.cpu() : torch::Tensor();
-    RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", tensorDebugStringWithData<int32_t>(token_ids_cpu).c_str());
+    // token_ids may be a CUDA tensor. Copy only the newly generated token per batch in dispatchSingleStream,
+    // instead of moving the whole [batch, max_seq_len] beam-search buffer to CPU every step.
+    RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", tensorDebugString(sampler_output.token_ids).c_str());
     const torch::Tensor success_cpu = sampler_output.success.defined() ? sampler_output.success.cpu() : torch::Tensor();
     int                 batch_idx_in     = 0;
     int                 batch_idx_out    = 0;
     int                 token_offset     = 0;
     bool                return_all_probs = stream_groups.needReturnAllProbs() != ReturnAllProbsMode::NONE;
-    auto                new_tokens_all   = torch::empty({(int64_t)total_batch_size_out, 1}, torch::kInt32);
 
     for (auto& stream : stream_groups.allStreams()) {
         auto cur_batch_size  = stream->currentBatchSize();
@@ -39,8 +36,7 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
                              batch_idx_out,
                              token_offset,
                              return_all_probs,
-                             new_tokens_all,
-                             token_ids_cpu,
+                             sampler_output.token_ids,
                              success_cpu);
 
         batch_idx_in += cur_batch_size;
@@ -58,20 +54,18 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                                   int                  batch_idx_out,
                                                   int                  token_offset,
                                                   bool                 return_all_probs,
-                                                  const torch::Tensor& new_tokens_all,
-                                                  const torch::Tensor& token_ids_cpu,
+                                                  const torch::Tensor& token_ids,
                                                   const torch::Tensor& success_cpu) const {
 
-    const auto&  model_output      = merge_outputs.model_output;
-    const auto&  sampler_output    = merge_outputs.sampler_output;
-    const auto&  new_all_token_ids = token_ids_cpu;
-    const size_t token_stride      = new_all_token_ids.size(1);
+    const auto&  model_output   = merge_outputs.model_output;
+    const auto&  sampler_output = merge_outputs.sampler_output;
+    const size_t token_stride   = token_ids.size(1);
 
     auto cur_batch_size  = stream->currentBatchSize();
     auto next_batch_size = stream->nextBatchSize();
     auto token_size      = stream->currentExecuteTokenSize();
 
-    auto batch_new_all_token_ids = new_all_token_ids.narrow(0, batch_idx_out, next_batch_size);
+    auto batch_token_ids = token_ids.narrow(0, batch_idx_out, next_batch_size);
 
     bool has_beam_search = stream->currentNumBeams() > 1 || stream->nextNumBeams() > 1;
     bool has_var_batch   = stream->currentBatchSize() != stream->nextBatchSize();
@@ -80,7 +74,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     torch::Tensor src_batch_indices;
     if (has_beam_search) {
         // beam search
-        src_batch_indices = sampler_output.beam_index.narrow(0, batch_idx_out, next_batch_size);
+        src_batch_indices = sampler_output.beam_index.narrow(0, batch_idx_out, next_batch_size).cpu().contiguous();
     } else if (has_var_batch) {
         // from context stream to decode straem, there might be other cases in future
         src_batch_indices = torch::zeros({(int64_t)next_batch_size}, torch::kInt32);
@@ -88,16 +82,31 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     const auto get_src_idx = [&](int32_t dst_idx) {
         return src_batch_indices.defined() ? src_batch_indices.data_ptr<int32_t>()[dst_idx] : dst_idx;
     };
+    const auto reorder_by_src_idx = [&](const torch::Tensor& raw_tensor) {
+        if (!(has_beam_search && src_batch_indices.defined())) {
+            return raw_tensor;
+        }
+        auto sizes = raw_tensor.sizes().vec();
+        RTP_LLM_CHECK(!sizes.empty());
+        sizes[0]              = next_batch_size;
+        auto reordered_tensor = torch::empty(sizes, raw_tensor.options());
+        for (int i = 0; i < next_batch_size; ++i) {
+            reordered_tensor[i].copy_(raw_tensor[get_src_idx(i)]);
+        }
+        return reordered_tensor;
+    };
 
     // construct update info
     torch::Tensor batch_hidden_states;
     if (stream->generateConfig()->return_hidden_states) {
-        batch_hidden_states = model_output.hidden_states.narrow(0, batch_idx_in, cur_batch_size);
+        auto raw_hidden_states = model_output.hidden_states.narrow(0, batch_idx_in, cur_batch_size);
+        batch_hidden_states    = reorder_by_src_idx(raw_hidden_states);
     }
 
     torch::Tensor batch_logits;
-    if (stream->returnLogits() || stream->calculateSoftmaxProbs() || has_beam_search) {
-        batch_logits = model_output.logits.narrow(0, batch_idx_in, cur_batch_size);
+    if (stream->returnLogits() || stream->calculateSoftmaxProbs()) {
+        auto raw_logits = model_output.logits.narrow(0, batch_idx_in, cur_batch_size);
+        batch_logits    = reorder_by_src_idx(raw_logits);
     }
 
     torch::Tensor all_probs;
@@ -127,11 +136,13 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
         all_hidden_states = model_output.all_hidden_states.narrow(0, token_offset, token_size);
     }
 
-    auto new_tokens = new_tokens_all.narrow(0, batch_idx_out, next_batch_size);
-    for (size_t i = 0; i < next_batch_size; ++i) {
-        new_tokens.data_ptr<int32_t>()[i] =
-            new_all_token_ids.data_ptr<int32_t>()[(batch_idx_out + i) * token_stride + token_stride - 1];
-    }
+    const size_t token_pos = has_beam_search ? stream->seqLength() : token_stride - 1;
+    RTP_LLM_CHECK_WITH_INFO(token_pos < token_stride,
+                            "new token pos[%lu] is out of token stride[%lu], stream_id[%ld]",
+                            token_pos,
+                            token_stride,
+                            stream->streamId());
+    auto new_tokens = batch_token_ids.narrow(1, token_pos, 1).cpu().contiguous();
 
     torch::Tensor current_softmax_result;
     if (stream->calculateSoftmaxProbs()) {
@@ -141,11 +152,9 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
 #else
         batch_softmax_input = torch::softmax(batch_softmax_input, -1);
 #endif
-        auto batch_softmax_tensor = batch_softmax_input.cpu();
-        current_softmax_result    = torch::empty({(int64_t)next_batch_size, 1}, torch::kFloat32);
-        for (int i = 0; i < next_batch_size; ++i) {
-            current_softmax_result[i][0] = batch_softmax_tensor[get_src_idx(i)][new_tokens.data_ptr<int32_t>()[i]];
-        }
+        auto selected_token_indices = batch_token_ids.narrow(1, token_pos, 1).to(batch_softmax_input.device());
+        current_softmax_result =
+            batch_softmax_input.gather(1, selected_token_indices.to(torch::kLong)).cpu().contiguous();
     }
 
     for (int i = 0; i < cur_batch_size; ++i) {
@@ -156,7 +165,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
 
     RTP_LLM_LOG_DEBUG("stream [%ld], new_tokens size = [%ld]", stream->streamId(), new_tokens.numel());
 
-    stream->update({has_beam_search ? batch_new_all_token_ids : new_tokens,
+    stream->update({new_tokens,
                     1,
                     batch_hidden_states,
                     batch_logits,

@@ -1,5 +1,8 @@
 #include <memory>
 #include <chrono>
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <c10/core/InferenceMode.h>
 #include <pybind11/pybind11.h>
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
@@ -15,6 +18,29 @@
 using namespace std;
 
 namespace rtp_llm {
+namespace {
+
+bool debugRtLogEnabled() {
+    static const bool enabled = []() {
+        const char* value = std::getenv("RTP_LLM_DEBUG_RT");
+        if (value == nullptr) {
+            return false;
+        }
+        std::string text(value);
+        std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return std::tolower(c); });
+        return text == "1" || text == "true" || text == "yes" || text == "on";
+    }();
+    return enabled;
+}
+
+int generateConfigMaxBatchSize(const std::shared_ptr<GenerateConfig>& generate_config) {
+    if (generate_config->hasNumBeams()) {
+        return generate_config->maxNumBeams();
+    }
+    return std::max(generate_config->num_return_sequences, 1);
+}
+
+}  // namespace
 
 grpc::Status LocalRpcServer::init(const EngineInitParams&                       maga_init_params,
                                   std::unique_ptr<ProposeModelEngineInitParams> propose_params,
@@ -78,10 +104,14 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
                                               WriterInterface*                 writer,
                                               std::shared_ptr<GenerateStream>& stream) {
     RTP_LLM_PROFILE_FUNCTION();
+    const auto begin_us     = currentTimeUs();
+    int        output_count = 0;
     // 需要检查 !hasError(): 之前 finished() 表示完成且无错，现在 FINISHED 状态可能包含错误
     // 如果流有错误，应该停止消费输出
     while (stream->isActive() || stream->hasOutput()) {
-        const auto result = stream->nextOutput();
+        const auto next_begin_us = currentTimeUs();
+        const auto result        = stream->nextOutput();
+        const auto next_done_us  = currentTimeUs();
         if (!result.ok()) {
             if (result.status().code() != ErrorCode::FINISHED) {
                 return serializeErrorMsg(request_key, result.status());
@@ -92,20 +122,33 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
         RTP_LLM_LOG_DEBUG("request [%s] generate next output success", request_key.c_str());
         GenerateOutputsPB outputs_pb;
 
+        const auto trans_begin_us = currentTimeUs();
         QueryConverter::transResponse(&outputs_pb,
                                       &(result.value()),
                                       stream->generateConfig()->aux_info,
                                       maga_init_params_.misc_config.aux_string,
                                       stream->specialTokens().eos_token_id);
+        const auto trans_done_us = currentTimeUs();
         if (context->IsCancelled()) {
             stream->reportError(ErrorCode::CANCELLED, "request cancelled by user");
             RTP_LLM_LOG_WARNING("request [%s] cancelled by user", request_key.c_str());
             return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
         }
+        const auto write_begin_us = currentTimeUs();
         if (!writer->Write(outputs_pb)) {
             stream->reportError(ErrorCode::CANCELLED, "write outputs pb failed");
             RTP_LLM_LOG_WARNING("request [%s] write outputs pb failed", request_key.c_str());
             return grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
+        }
+        const auto write_done_us = currentTimeUs();
+        output_count++;
+        if (debugRtLogEnabled()) {
+            RTP_LLM_LOG_INFO("request [%s] poll output #%d next_output_us=%ld trans_response_us=%ld write_us=%ld",
+                             request_key.c_str(),
+                             output_count,
+                             next_done_us - next_begin_us,
+                             trans_done_us - trans_begin_us,
+                             write_done_us - write_begin_us);
         }
         if (stream->hasEvent(StreamEvents::NeedRemoteGenerate)) {
             break;
@@ -115,7 +158,14 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
             break;
         }
     }
-    RTP_LLM_LOG_DEBUG("request [%s] local generate done", request_key.c_str());
+    if (debugRtLogEnabled()) {
+        RTP_LLM_LOG_INFO("request [%s] local generate done outputs=%d total_poll_us=%ld",
+                         request_key.c_str(),
+                         output_count,
+                         currentTimeUs() - begin_us);
+    } else {
+        RTP_LLM_LOG_DEBUG("request [%s] local generate done", request_key.c_str());
+    }
 
     return grpc::Status::OK;
 }
@@ -167,12 +217,16 @@ ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*              
                                               std::shared_ptr<GenerateStream>&      stream,
                                               const std::shared_ptr<GenerateInput>& input,
                                               GenerateOutputs&                      last_outputs) {
+    const auto begin_us     = currentTimeUs();
+    int        output_count = 0;
     while (!stream->isFinished() || stream->hasOutput()) {
         if (context->IsCancelled()) {
             stream->reportError(ErrorCode::CANCELLED, "request cancelled by client");
             return ErrorInfo(ErrorCode::CANCELLED, "request cancelled by client");
         }
+        const auto next_begin_us = currentTimeUs();
         const auto output_result = stream->nextOutput();
+        const auto next_done_us  = currentTimeUs();
         if (!output_result.ok()) {
             if (output_result.status().code() != ErrorCode::FINISHED) {
                 return output_result.status();
@@ -180,6 +234,21 @@ ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*              
             break;
         }
         last_outputs = output_result.value();
+        output_count++;
+        if (debugRtLogEnabled()) {
+            RTP_LLM_LOG_INFO("request [%ld] collect output #%d next_output_us=%ld",
+                             input->request_id,
+                             output_count,
+                             next_done_us - next_begin_us);
+        }
+    }
+    if (debugRtLogEnabled()) {
+        RTP_LLM_LOG_INFO("request [%ld] collect done outputs=%d total_collect_us=%ld max_batch_size=%d input_len=%d",
+                         input->request_id,
+                         output_count,
+                         currentTimeUs() - begin_us,
+                         stream->maxBatchSize(),
+                         stream->inputLength());
     }
     return ErrorInfo::OkStatus();
 }
@@ -188,6 +257,7 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
                                                 const GenerateInputPB*                 request,
                                                 grpc::ServerWriter<GenerateOutputsPB>* writer) {
     RTP_LLM_PROFILE_SCOPE("rpc.generate_stream_call");
+    const auto         call_begin_us = currentTimeUs();
     c10::InferenceMode inference_guard(true);
     AtomicGuard        request_guard(onflight_requests_);
     auto               request_id = request->request_id();
@@ -205,8 +275,17 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
 
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", request_id);
     {
+        const auto enqueue_begin_us = currentTimeUs();
         RTP_LLM_PROFILE_SCOPE("rpc.enqueue_engine");
         generate_context.setStream(engine_->enqueue(input));
+        if (debugRtLogEnabled()) {
+            RTP_LLM_LOG_INFO("request [%ld] enqueue_engine_us=%ld input_len=%d max_batch_size=%d timeout_ms=%d",
+                             request_id,
+                             currentTimeUs() - enqueue_begin_us,
+                             input->inputLength(),
+                             generateConfigMaxBatchSize(input->generate_config),
+                             input->generate_config->timeout_ms);
+        }
     }
 
     RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", request_id);
@@ -214,6 +293,10 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     generate_context.error_status =
         pollStreamOutput(context, generate_context.request_key, writer, generate_context.getStream());
     meta_->dequeue(generate_context.request_id, generate_context.getStream());
+    if (debugRtLogEnabled()) {
+        RTP_LLM_LOG_INFO(
+            "request [%ld] GenerateStreamCall done total_rpc_us=%ld", request_id, currentTimeUs() - call_begin_us);
+    }
     return generate_context.error_status;
 }
 
@@ -221,6 +304,7 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
                                                const BatchGenerateInputPB* request,
                                                BatchGenerateOutputsPB*     response) {
     RTP_LLM_PROFILE_SCOPE("rpc.batch_generate_call");
+    const auto         call_begin_us = currentTimeUs();
     c10::InferenceMode inference_guard(true);
     AtomicGuard        request_guard(onflight_requests_);
     const int          batch_size = request->inputs_size();
@@ -232,6 +316,7 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
 
     std::vector<std::shared_ptr<GenerateInput>> inputs;
     inputs.reserve(batch_size);
+    const auto prepare_begin_us = currentTimeUs();
     for (int i = 0; i < batch_size; i++) {
         std::shared_ptr<GenerateInput> input;
         auto                           err = prepareInput(request->inputs(i), input);
@@ -252,11 +337,23 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         }
         inputs.push_back(input);
     }
+    const auto prepare_done_us = currentTimeUs();
 
     // batchEnqueue contract: returned vector is 1:1 with `inputs` (same size, same order).
     // Streams that failed checkInputLength carry an error reported via reportError() and surface
     // it through collectStreamOutput → nextOutput → ErrorInfo path below.
-    auto streams = engine_->batchEnqueue(inputs);
+    const auto enqueue_begin_us = currentTimeUs();
+    auto       streams          = engine_->batchEnqueue(inputs);
+    const auto enqueue_done_us  = currentTimeUs();
+    if (debugRtLogEnabled()) {
+        RTP_LLM_LOG_INFO(
+            "batch generate prepared batch_size=%d prepare_us=%ld enqueue_us=%ld first_input_len=%d first_max_batch_size=%d",
+            batch_size,
+            prepare_done_us - prepare_begin_us,
+            enqueue_done_us - enqueue_begin_us,
+            inputs.empty() ? 0 : inputs[0]->inputLength(),
+            inputs.empty() ? 0 : generateConfigMaxBatchSize(inputs[0]->generate_config));
+    }
 
     // collectStreamOutput is currently SERIAL: streams[0] must finish before streams[1] is drained.
     // For batch decode this is bounded (all streams advance together), but TODO: parallelize for
@@ -265,23 +362,38 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         auto* result = response->add_results();
 
         GenerateOutputs last_outputs;
-        auto            err = collectStreamOutput(context, streams[i], inputs[i], last_outputs);
+        const auto      collect_begin_us = currentTimeUs();
+        auto            err              = collectStreamOutput(context, streams[i], inputs[i], last_outputs);
+        const auto      collect_done_us  = currentTimeUs();
         if (!err.ok()) {
             auto* err_pb = result->mutable_error_info();
             err_pb->set_error_code(err.code() == ErrorCode::CANCELLED ? ErrorCodePB::CANCELLED :
                                                                         ErrorCodePB::UNKNOWN_ERROR);
             err_pb->set_error_message(err.ToString());
         } else {
-            auto* output_pb = result->mutable_final_output();
+            auto*      output_pb      = result->mutable_final_output();
+            const auto trans_begin_us = currentTimeUs();
             QueryConverter::transResponse(output_pb,
                                           &last_outputs,
                                           inputs[i]->generate_config->aux_info,
                                           maga_init_params_.misc_config.aux_string,
                                           streams[i]->specialTokens().eos_token_id);
+            if (debugRtLogEnabled()) {
+                RTP_LLM_LOG_INFO("batch item %d request [%ld] collect_us=%ld trans_response_us=%ld",
+                                 i,
+                                 inputs[i]->request_id,
+                                 collect_done_us - collect_begin_us,
+                                 currentTimeUs() - trans_begin_us);
+            }
         }
     }
 
-    RTP_LLM_LOG_INFO("batch generate done, batch_size=%d", batch_size);
+    if (debugRtLogEnabled()) {
+        RTP_LLM_LOG_INFO(
+            "batch generate done, batch_size=%d total_rpc_us=%ld", batch_size, currentTimeUs() - call_begin_us);
+    } else {
+        RTP_LLM_LOG_INFO("batch generate done, batch_size=%d", batch_size);
+    }
     return grpc::Status::OK;
 }
 

@@ -6,6 +6,8 @@
 #define private public
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -920,6 +922,127 @@ TEST_F(NormalBatchStreamProcessorTest, testInputEmbeddingsEmpty) {
     auto& model_input = merge_input_status.value();
     // 验证没有 input_embeddings 时，字段为空
     EXPECT_FALSE(model_input.input_embeddings.has_value());
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testBeamSearchDispatchReordersByBeamIndexAndUsesSeqLengthToken) {
+    auto cache_config = test::makeSimpleMhaCacheConfig(
+        /*layer_num=*/2, /*block_num=*/20, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len                  = 8;
+    model_config.vocab_size                   = 4;
+    model_config.num_layers                   = 2;
+    model_config.attn_config.kv_cache_dtype   = KvCacheDataType::INT8;
+    model_config.attn_config.tokens_per_block = 2;
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    RuntimeConfig               runtime_config;
+
+    auto query                                   = make_shared<GenerateInput>();
+    query->input_ids                             = hostIntBuffer({1});
+    query->generate_config                       = make_shared<GenerateConfig>();
+    query->generate_config->num_beams            = 2;
+    query->generate_config->max_new_tokens       = 2;
+    query->generate_config->is_streaming         = true;
+    query->generate_config->return_logits        = true;
+    query->generate_config->return_hidden_states = true;
+    query->generate_config->return_softmax_probs = true;
+    query->generate_config->reuse_cache          = false;
+    query->need_release_resource                 = false;
+
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    stream->generate_status_->status = StreamState::RUNNING;
+    ASSERT_TRUE(stream->initKVBlock().ok());
+
+    CacheConfig proc_cache_config;
+    proc_cache_config.group_types = {CacheGroupType::FULL};
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, proc_cache_config, false);
+
+    std::list<GenerateStreamPtr> streams;
+    streams.emplace_back(stream);
+
+    {
+        StreamGroups stream_groups(streams);
+        ASSERT_TRUE(processor.gatherModelInput(stream_groups).ok());
+
+        auto token_ids  = torch::zeros({2, 8}, torch::kInt32);
+        token_ids[0][0] = 1;
+        token_ids[0][1] = 2;
+        token_ids[1][0] = 1;
+        token_ids[1][1] = 3;
+
+        MergedOutput merge_outputs;
+        merge_outputs.model_output.logits = torch::tensor({0.0f, 10.0f, 20.0f, 30.0f}).reshape({1, 4}).to(torch::kCUDA);
+        merge_outputs.model_output.hidden_states   = torch::tensor({5.0f, 6.0f}).reshape({1, 2}).to(torch::kCUDA);
+        merge_outputs.sampler_output.token_ids     = token_ids.to(torch::kCUDA);
+        merge_outputs.sampler_output.beam_index    = torch::tensor({0, 0}, torch::kInt32);
+        merge_outputs.sampler_output.cum_log_probs = torch::tensor({-0.1f, -0.2f}).to(torch::kCUDA);
+
+        auto status = processor.dispatch(stream_groups, merge_outputs);
+        ASSERT_TRUE(status.ok()) << status.ToString();
+        ASSERT_EQ(stream->seqLength(), 2);
+        ASSERT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{1, 2}));
+        ASSERT_EQ(stream->completeTokenIdsVec(1), (std::vector<int>{1, 3}));
+        ASSERT_FALSE(stream->hasOutput());
+    }
+
+    {
+        StreamGroups stream_groups(streams);
+        ASSERT_TRUE(processor.gatherModelInput(stream_groups).ok());
+
+        auto token_ids  = torch::zeros({2, 8}, torch::kInt32);
+        token_ids[0][0] = 1;
+        token_ids[0][1] = 3;
+        token_ids[0][2] = 0;
+        token_ids[1][0] = 1;
+        token_ids[1][1] = 2;
+        token_ids[1][2] = 1;
+
+        MergedOutput merge_outputs;
+        merge_outputs.model_output.logits =
+            torch::tensor({10.0f, 20.0f, 30.0f, 40.0f, 40.0f, 30.0f, 20.0f, 10.0f}).reshape({2, 4}).to(torch::kCUDA);
+        merge_outputs.model_output.hidden_states =
+            torch::tensor({1.0f, 2.0f, 3.0f, 4.0f}).reshape({2, 2}).to(torch::kCUDA);
+        merge_outputs.sampler_output.token_ids     = token_ids.to(torch::kCUDA);
+        merge_outputs.sampler_output.beam_index    = torch::tensor({1, 0}, torch::kInt32);
+        merge_outputs.sampler_output.cum_log_probs = torch::tensor({-0.3f, -0.5f}).to(torch::kCUDA);
+
+        auto status = processor.dispatch(stream_groups, merge_outputs);
+        ASSERT_TRUE(status.ok()) << status.ToString();
+        ASSERT_EQ(stream->seqLength(), 3);
+        ASSERT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{1, 3, 0}));
+        ASSERT_EQ(stream->completeTokenIdsVec(1), (std::vector<int>{1, 2, 1}));
+
+        ASSERT_TRUE(stream->hasOutput());
+        auto output = stream->nextOutput();
+        ASSERT_TRUE(output.ok());
+        ASSERT_EQ(output.value().generate_outputs.size(), 2);
+
+        const auto logits0 = output.value().generate_outputs[0].logits.value();
+        const auto logits1 = output.value().generate_outputs[1].logits.value();
+        EXPECT_GT(logits0.data_ptr<float>()[0], 0.99f);
+        EXPECT_LT(logits0.data_ptr<float>()[3], 0.001f);
+        EXPECT_GT(logits1.data_ptr<float>()[3], 0.99f);
+        EXPECT_LT(logits1.data_ptr<float>()[0], 0.001f);
+
+        const auto hidden0 = output.value().generate_outputs[0].hidden_states.value();
+        const auto hidden1 = output.value().generate_outputs[1].hidden_states.value();
+        EXPECT_TRUE(torch::equal(hidden0, torch::tensor({3.0f, 4.0f}).reshape({1, 2})));
+        EXPECT_TRUE(torch::equal(hidden1, torch::tensor({1.0f, 2.0f}).reshape({1, 2})));
+
+        auto softmax_probs = stream->getSoftmaxProbs();
+        ASSERT_TRUE(softmax_probs.defined());
+        EXPECT_GT(softmax_probs.data_ptr<float>()[1], softmax_probs.data_ptr<float>()[softmax_probs.size(1) + 1]);
+        EXPECT_GT(softmax_probs.data_ptr<float>()[2], 0.99f);
+        EXPECT_LT(softmax_probs.data_ptr<float>()[softmax_probs.size(1) + 2], 0.001f);
+    }
 }
 
 }  // namespace rtp_llm
