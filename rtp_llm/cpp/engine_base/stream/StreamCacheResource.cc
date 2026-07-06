@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include <algorithm>
 #include <sstream>
 #include <thread>
 #include <torch/extension.h>
@@ -285,6 +286,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
             // save cache to gpu
             if (enableDeviceCache()) {
                 InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false};
+                insert_info.cacheable_blocks = stream_->maxReusableBlockNum();
                 resource_context_.cache_manager->insertIntoCache(insert_info);
             }
             storeCacheAsync(batch_kv_cache_resource_,
@@ -331,6 +333,7 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     malloc_info.request_id              = stream_->streamId();
     malloc_info.epoch                   = resource_context_.enable_reuse_cache_in_batch ? stream_->batchEpoch() : 0;
     malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
+    malloc_info.max_reuse_blocks        = stream_->maxReusableBlockNum();
 
     const bool is_hybrid       = resource_context_.cache_manager->cacheConfig().groupNums() > 1;
     const bool is_decode_role  = (resource_context_.role_type == RoleType::DECODE);
@@ -378,6 +381,7 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
     malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
     malloc_info.reuse_cache             = reuseCache();
     malloc_info.enable_device_cache     = reuseCache() && enableDeviceCache();
+    malloc_info.max_reuse_blocks        = stream_->maxReusableBlockNum();
     malloc_info.enable_remove_skipped_blocks = true;
 
     malloc_info.complete_token_ids->setReserveStep(reserve_step);
@@ -420,7 +424,9 @@ bool StreamCacheResource::asyncLoadCache() {
         reuseCache() && enableMemoryCache(), reuseCache() && enableRemoteCache(), stream_->traceId());
     meta->generate_stream_ = stream_;
     meta->fillRoutingContext(stream_);  // Fill routing context once from GenerateStream
-    auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
+    auto connector_resource = batch_kv_cache_resource_->prefixCopy(
+        std::min(batch_kv_cache_resource_->cacheKeys(0).size(), stream_->maxReusableBlockNum()));
+    auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(connector_resource, meta);
     load_cache_context_    = resource_context_.cache_manager->asyncLoadCache(connector_context);
     if (!load_cache_context_) {
         load_cache_once_.store(false, std::memory_order_release);
@@ -594,7 +600,9 @@ void StreamCacheResource::loadCacheSync() {
         reuseCache() && enableMemoryCache(), reuseCache() && enableRemoteCache(), stream_->traceId());
     meta->generate_stream_ = stream_;
     meta->fillRoutingContext(stream_);  // Fill routing context once from GenerateStream
-    auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
+    auto connector_resource = batch_kv_cache_resource_->prefixCopy(
+        std::min(batch_kv_cache_resource_->cacheKeys(0).size(), stream_->maxReusableBlockNum()));
+    auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(connector_resource, meta);
     std::shared_ptr<AsyncContext> load_cache_context;
     {
         RTP_LLM_PROFILE_SCOPE("asyncLoadCache");
@@ -650,8 +658,10 @@ void StreamCacheResource::updateReuseLengthsFromContext(const std::shared_ptr<Fu
 std::shared_ptr<AsyncContext> StreamCacheResource::storeCacheAsync(
     const std::shared_ptr<BatchKVCacheResource>& batch_resource, bool enable_memory_cache, bool enable_remote_cache) {
     RTP_LLM_PROFILE_FUNCTION();
-    auto meta              = std::make_shared<MetaImpl>(enable_memory_cache, enable_remote_cache, stream_->traceId());
-    auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_resource, meta);
+    auto meta = std::make_shared<MetaImpl>(enable_memory_cache, enable_remote_cache, stream_->traceId());
+    auto connector_resource =
+        batch_resource->prefixCopy(std::min(batch_resource->cacheKeys(0).size(), stream_->maxReusableBlockNum()));
+    auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(connector_resource, meta);
     auto store_context     = resource_context_.cache_manager->asyncStoreCache(connector_context);
     if (resource_context_.write_cache_sync) {
         waitStoreCacheDone(store_context);
@@ -754,8 +764,9 @@ void StreamCacheResource::insertIntoCache() {
                             stream_->streamId());
         return;
     }
-    const size_t token_len       = static_cast<size_t>(stream_->completeTokenIdsPtr()->seqLength());
-    const size_t full_blocks_num = token_len / static_cast<size_t>(seqSizePerBlock());
+    const size_t token_len = static_cast<size_t>(stream_->completeTokenIdsPtr()->seqLength());
+    const size_t full_blocks_num =
+        std::min(token_len / static_cast<size_t>(seqSizePerBlock()), stream_->maxReusableBlockNum());
     // Hot-path optimization: insert downstream only reads cache_keys +
     // per-group block_indices. prefixCopy duplicates only full block entries
     // and skips layer_block_ids rebuild, avoiding ~100KB of per-stream memcpy

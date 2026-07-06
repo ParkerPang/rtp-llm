@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <limits>
 #include <vector>
 #include <cstdint>
 
@@ -55,6 +56,9 @@ struct MallocInfo {
     bool    verbose             = true;  // for failed log
     bool    reuse_cache         = true;
     bool    enable_device_cache = true;
+    // Maximum full KV blocks whose token-only cache keys are safe to match.
+    // Requests with input_embeddings cap this at the first embedding location.
+    size_t max_reuse_blocks = std::numeric_limits<size_t>::max();
     // Sparse linear-block cleanup is only valid for incremental allocation.
     bool enable_remove_skipped_blocks = true;
 };

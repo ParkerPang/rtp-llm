@@ -1,5 +1,7 @@
 #include <condition_variable>
+#include <algorithm>
 #include <cstddef>
+#include <limits>
 #include <memory>
 #include <ATen/Generator.h>
 #if defined(USING_CUDA) || defined(USING_ROCM)
@@ -326,18 +328,36 @@ int GenerateStream::initialReuseLength() const {
     return initial_reuse_length_;
 }
 
-void GenerateStream::setReuseLength(int reuse_length) {
-    reuse_length_ = reuse_length;
-    // Cap reuseLength so it doesn't exceed any input_embeddings location.
-    // Only needed during prefill; on decode/speculative paths the KV cache
-    // already incorporates the custom embeddings.
-    if (*is_context_stream_ && generate_input_->input_embeddings_locs) {
-        for (int32_t loc : generate_input_->input_embeddings_locs.value()) {
-            if (reuse_length_ > loc) {
-                reuse_length_ = loc;
-            }
-        }
+int GenerateStream::maxReusablePrefixLength() const {
+    if (!hasInputEmbeddings()) {
+        return std::numeric_limits<int>::max();
     }
+    int max_reusable_prefix_len = inputLength();
+    if (generate_input_->input_embeddings_locs.has_value() && !generate_input_->input_embeddings_locs->empty()) {
+        for (int32_t loc : generate_input_->input_embeddings_locs.value()) {
+            max_reusable_prefix_len = std::min(max_reusable_prefix_len, std::max(0, static_cast<int>(loc)));
+        }
+        return max_reusable_prefix_len;
+    }
+    return 0;
+}
+
+size_t GenerateStream::maxReusableBlockNum() const {
+    if (!hasInputEmbeddings()) {
+        return std::numeric_limits<size_t>::max();
+    }
+    const int seq_size_per_block = seqSizePerBlock();
+    if (seq_size_per_block <= 0) {
+        return 0;
+    }
+    return static_cast<size_t>(maxReusablePrefixLength() / seq_size_per_block);
+}
+
+void GenerateStream::setReuseLength(int reuse_length) {
+    if (*is_context_stream_) {
+        reuse_length = std::min(reuse_length, maxReusablePrefixLength());
+    }
+    reuse_length_ = reuse_length;
 }
 
 void GenerateStream::setLocalReuseLength(int length) {

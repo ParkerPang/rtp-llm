@@ -234,7 +234,9 @@ MallocResult HybridTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
 
     if (malloc_info.enable_device_cache) {
         // Drop last key of partial block (same rationale as SingleType).
-        CacheKeysType match_keys(cache_keys.begin(), cache_keys.empty() ? cache_keys.end() : cache_keys.end() - 1);
+        const size_t match_key_num =
+            std::min(cache_keys.empty() ? size_t{0} : cache_keys.size() - 1, malloc_info.max_reuse_blocks);
+        CacheKeysType match_keys(cache_keys.begin(), cache_keys.begin() + match_key_num);
         auto          begin_us = currentTimeUs();
         reuse_blocks           = reuseCache(match_keys, *kv_resource, malloc_info.epoch);
         match_cost_time_us     = currentTimeUs() - begin_us;

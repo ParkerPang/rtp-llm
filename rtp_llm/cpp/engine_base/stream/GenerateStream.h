@@ -189,6 +189,8 @@ public:
     int     prefixLength() const;
     int     reuseLength() const;
     int     initialReuseLength() const;
+    int     maxReusablePrefixLength() const;
+    size_t  maxReusableBlockNum() const;
     size_t  maxTokenNum() const;
     void    setReuseLength(int reuse_length);
     void    setLocalReuseLength(int length);
@@ -497,19 +499,19 @@ public:
     }
 
     bool reuseCache() const {
-        return !hasInputEmbeddings() && generate_input_->generate_config->reuse_cache;
+        return generate_input_->generate_config->reuse_cache;
     }
 
     bool enableDeviceCache() const {
-        return !hasInputEmbeddings() && generate_input_->generate_config->enable_device_cache;
+        return generate_input_->generate_config->enable_device_cache;
     }
 
     bool enableMemoryCache() const {
-        return !hasInputEmbeddings() && generate_input_->generate_config->enable_memory_cache;
+        return generate_input_->generate_config->enable_memory_cache;
     }
 
     bool enableRemoteCache() const {
-        return !hasInputEmbeddings() && generate_input_->generate_config->enable_remote_cache;
+        return generate_input_->generate_config->enable_remote_cache;
     }
 
     int64_t deadlineMs() const {

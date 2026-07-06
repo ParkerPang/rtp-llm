@@ -27,13 +27,28 @@ def has_input_embeddings(input: GenerateInput) -> bool:
     )
 
 
-def disable_token_only_reuse_for_input_embeddings(input: GenerateInput) -> None:
+def first_input_embedding_loc(input: GenerateInput) -> Optional[int]:
     if not has_input_embeddings(input):
+        return None
+    if not input.input_embeddings.embedding_locs:
+        return 0
+    return max(0, min(input.input_embeddings.embedding_locs))
+
+
+def cap_token_only_reuse_for_input_embeddings(input: GenerateInput) -> None:
+    first_loc = first_input_embedding_loc(input)
+    if first_loc is None or first_loc > 0:
         return
     input.generate_config.reuse_cache = False
     input.generate_config.enable_device_cache = False
     input.generate_config.enable_memory_cache = False
     input.generate_config.enable_remote_cache = False
+
+
+# Backward-compatible name for existing imports/tests.
+disable_token_only_reuse_for_input_embeddings = (
+    cap_token_only_reuse_for_input_embeddings
+)
 
 
 class BackendRPCServerVisitor:
@@ -150,7 +165,8 @@ class BackendRPCServerVisitor:
         Returns None on success; on failure returns FlexlbResponse for routing decisions.
         request_id is frontend-generated and is not overwritten.
         """
-        if has_input_embeddings(input):
+        first_embedding_loc = first_input_embedding_loc(input)
+        if first_embedding_loc == 0:
             block_cache_keys = []
             route_logger.debug(
                 "skip token-only block cache keys for input_embeddings request_id=%s",
@@ -162,6 +178,8 @@ class BackendRPCServerVisitor:
                 if len(input.token_ids.shape) == 2
                 else input.token_ids.tolist()
             )
+            if first_embedding_loc is not None:
+                token_ids = token_ids[:first_embedding_loc]
             block_cache_keys = get_block_cache_keys(token_ids, self.seq_size_per_block)
 
         try:
@@ -339,7 +357,7 @@ class BackendRPCServerVisitor:
     async def enqueue(
         self, input: GenerateInput
     ) -> AsyncGenerator[GenerateOutputs, None]:
-        disable_token_only_reuse_for_input_embeddings(input)
+        cap_token_only_reuse_for_input_embeddings(input)
         self._validate_input(input)
         self.check_sp_supported(input)
 
@@ -351,7 +369,7 @@ class BackendRPCServerVisitor:
     @torch.inference_mode()
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
         for input in inputs:
-            disable_token_only_reuse_for_input_embeddings(input)
+            cap_token_only_reuse_for_input_embeddings(input)
             self._validate_input(input)
             self.check_sp_supported(input)
 
