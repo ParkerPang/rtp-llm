@@ -338,6 +338,12 @@ class PerTokenGroupQuantTest(TestCase):
             # BF16-to-int8 rounding and the historical -127/-128 clamp-floor
             # difference between the CUDA and Triton references can differ by one.
             torch.testing.assert_close(x_q_sglang, x_q_triton, rtol=0, atol=1)
+            mismatch_ratio = (x_q_sglang != x_q_triton).float().mean().item()
+            self.assertLess(
+                mismatch_ratio,
+                0.05,
+                "int8 quantization differs from the reference for too many values",
+            )
         else:
             if input_dtype == torch.float16:
                 self.assertTrue(

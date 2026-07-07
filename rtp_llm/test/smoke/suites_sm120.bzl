@@ -40,6 +40,12 @@ def sm120_suites():
                 smoke_args = "--act_type FP16 --warm_up 0",
                 gpu_type = ["RTX_5000_PRO"],
             ),
+            smoke_test(
+                name = "tp2_sm120",
+                task_info = "data/model/qwen25/q_r_s_fp16_sm120.json",
+                smoke_args = "--warm_up 0 --act_type FP16 --tp_size 2 --world_size 2",
+                gpu_type = ["RTX_5000_PRO"],
+            ),
         ],
     )
 
@@ -75,10 +81,24 @@ def sm120_suites():
                 gpu_type = ["RTX_5000_PRO"],
             ),
             smoke_test(
-                name = "qwen3_1_7b_prequant_fp8pb_sm120",
+                name = "qwen3_1_7b_prequant_fp8pb_tp2_sm120",
                 task_info = "data/model/qwen3/q_r_1_7b_prequant_fp8_sm120.json",
                 envs = ["LOAD_PYTHON_MODEL=1"],
-                smoke_args = "--act_type BF16 --warm_up 0",
+                smoke_args = "--act_type BF16 --warm_up 0 --tp_size 2 --world_size 2",
+                gpu_type = ["RTX_5000_PRO"],
+            ),
+        ],
+    )
+    # RTX 5000 Pro has no NVLink, so keep this on the PureTP router and the
+    # SM120 Triton grouped-GEMM executor rather than DeepEP.
+    native.test_suite(
+        name = "smoke_sm120_moe",
+        tests = [
+            smoke_test(
+                name = "moe_fp8pb_tp2_sm120",
+                task_info = "data/model/qwen3_moe/q_r_30b_fp8pb_sm120.json",
+                envs = ["LOAD_PYTHON_MODEL=1"],
+                smoke_args = "--moe_strategy auto --quantization FP8_PER_BLOCK --warm_up 0 --act_type BF16 --tp_size 2 --world_size 2 --reserver_runtime_mem_mb 16005 --seq_size_per_block 64 --concurrency_limit 64",
                 gpu_type = ["RTX_5000_PRO"],
             ),
         ],

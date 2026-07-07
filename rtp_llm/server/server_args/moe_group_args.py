@@ -172,6 +172,7 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
             "fp8_per_block_ep_normal",
             "fp8_per_block_pure_cp",
             "fp8_per_block_pure_dp",
+            "fp8_per_block_sm120_grouped",
             "fp8_per_tensor_no_dp",
             "fp8_per_tensor_ep_low_latency",
             "fp8_per_tensor_ep_normal",
@@ -183,7 +184,10 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
             "fp4_no_dp",
         ],
         default="auto",
-        help="指定moe strategy, 默认为auto",
+        help=(
+            "指定 MoE strategy，默认为 auto。fp8_per_block_sm120_grouped 仅适用于 "
+            "SM12x、FP8_PER_BLOCK、PureTP/单卡且关闭 CUDA graph 的配置。"
+        ),
     )
     moe_group.add_argument(
         "--fp4_moe_op",

@@ -1,4 +1,4 @@
-"""SM120 production-registry coverage for unsupported FP8 PER_BLOCK MoE."""
+"""SM120 production-registry coverage for FP8 PER_BLOCK PureTP MoE."""
 
 import unittest
 
@@ -10,13 +10,22 @@ from rtp_llm.models_py.modules.factory.fused_moe import FusedMoeFactory
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.sm120_fp8_grouped_gemm_executor import (
+    Sm120Fp8GroupedGemmExecutor,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
+    PureTpRouterFp8PerBlock,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy.fp8_per_block import (
+    CudaSm120Fp8GroupedGemmNoDPStrategy,
+)
 from rtp_llm.models_py.utils.arch import is_sm12x
 from rtp_llm.ops import MoeConfig, ParallelismConfig
 
 
 @unittest.skipUnless(
     torch.cuda.is_available() and is_sm12x(),
-    "SM120 MoE rejection coverage requires consumer Blackwell",
+    "SM120 MoE strategy coverage requires consumer Blackwell",
 )
 class TestSM120Fp8PerBlockStrategies(unittest.TestCase):
 
@@ -26,7 +35,7 @@ class TestSM120Fp8PerBlockStrategies(unittest.TestCase):
         model_config.data_type = "bf16"
         parallelism_config = ParallelismConfig()
         parallelism_config.ep_size = 1
-        parallelism_config.tp_size = 1
+        parallelism_config.tp_size = 2
         parallelism_config.dp_size = 1
         moe_config = MoeConfig()
         moe_config.moe_strategy = "auto"
@@ -39,18 +48,42 @@ class TestSM120Fp8PerBlockStrategies(unittest.TestCase):
         )
         self.registry = FusedMoeFactory.get_registry()
 
-    def test_production_registry_has_no_sm120_fp8_per_block_candidate(self):
+    def test_production_registry_selects_sm120_grouped_gemm(self):
         candidates = [
             strategy
             for strategy in self.registry.list_strategies()
             if strategy.can_handle(self.config)
         ]
-        self.assertEqual(candidates, [])
+        self.assertEqual(len(candidates), 1)
+        self.assertIsInstance(candidates[0], CudaSm120Fp8GroupedGemmNoDPStrategy)
 
-    def test_production_registry_fails_with_actionable_error(self):
-        with self.assertRaisesRegex(
-            ValueError, "SM12x FP8_PER_BLOCK MoE is not supported yet"
-        ):
+    def test_selected_strategy_uses_pure_tp_and_triton_executor(self):
+        strategy = self.registry.get_strategy(self.config)
+        attributes = strategy.get_attributes()
+        self.assertIs(attributes.router_class, PureTpRouterFp8PerBlock)
+        self.assertIs(attributes.executor_class, Sm120Fp8GroupedGemmExecutor)
+
+    def test_explicit_strategy_selects_sm120_grouped_gemm(self):
+        self.config.moe_strategy = "fp8_per_block_sm120_grouped"
+        self.assertIsInstance(
+            self.registry.get_strategy(self.config),
+            CudaSm120Fp8GroupedGemmNoDPStrategy,
+        )
+
+    def test_cuda_graph_is_rejected(self):
+        self.config.enable_cuda_graph = True
+        candidates = [
+            strategy
+            for strategy in self.registry.list_strategies()
+            if strategy.can_handle(self.config)
+        ]
+        self.assertFalse(
+            any(
+                isinstance(strategy, CudaSm120Fp8GroupedGemmNoDPStrategy)
+                for strategy in candidates
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "No suitable MOE strategy"):
             self.registry.get_strategy(self.config)
 
 

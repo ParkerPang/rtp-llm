@@ -238,7 +238,6 @@ def cutlass_scaled_mm_blockwise_sm120_fp8(D: torch.Tensor, A: torch.Tensor, B: t
 def has_cutlass_scaled_mm_blockwise_sm120_fp8() -> bool:
     """Conditional cuda12_9 x86 symbol; callers must also tolerate its absence."""
     ...
-def has_cutlass_scaled_mm_blockwise_sm120_fp8() -> bool: ...
 def debug_kernel(data: torch.Tensor, start_row: int, start_col: int, m: int, n: int, row_len: int, info_id: int) -> None:
     """
     Debug kernel to print 2D data blocks from GPU tensor

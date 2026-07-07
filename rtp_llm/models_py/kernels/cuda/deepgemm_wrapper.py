@@ -57,7 +57,10 @@ def has_deep_gemm() -> bool:
 
 @functools.cache
 def _supports_deep_gemm_device(device_id: int) -> bool:
-    return torch.cuda.get_device_capability(device_id)[0] in (9, 10)
+    # Preserve DeepGEMM selection on existing architectures. SM12x uses its
+    # dedicated FP8 implementations because the bundled wheel has no sm_12x
+    # kernels.
+    return torch.cuda.get_device_capability(device_id)[0] != 12
 
 
 def supports_deep_gemm(device_id: Optional[int] = None) -> bool:
@@ -66,9 +69,8 @@ def supports_deep_gemm(device_id: Optional[int] = None) -> bool:
         return False
     if device_id is None:
         device_id = torch.cuda.current_device()
-    # The bundled DeepGEMM wheel has sm_90/sm_100 cubins, but no sm_12x
-    # consumer-Blackwell kernels. Keep unsupported devices out of all dense
-    # and MoE strategy selection paths instead of failing at first launch.
+    # Keep SM12x out of dense and MoE DeepGEMM strategy selection instead of
+    # failing at first launch.
     return _supports_deep_gemm_device(device_id)
 
 

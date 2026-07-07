@@ -54,6 +54,8 @@ py_test(
     name = "fp8_vllm_blockwise_sm120_factory_test",
     srcs = ["fp8_vllm_blockwise_sm120_factory_test.py"],
     deps = py_test_deps,
+    tags = ["H20"],
+    exec_properties = {'gpu':'H20'},
 )
 
 py_test(
