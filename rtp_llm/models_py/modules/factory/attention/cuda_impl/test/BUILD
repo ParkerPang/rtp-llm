@@ -34,6 +34,21 @@ py_test (
     exec_properties = {'gpu':'SM100_ARM', 'gpu_count':'1'}
 )
 
+# Test for FlashInfer prefill support contracts.
+py_test(
+    name = "test_py_flashinfer_mha_prefill_support",
+    srcs = ["test_py_flashinfer_mha_prefill_support.py"],
+    deps = py_test_deps + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:cuda_pre_12_9": flashinfer_deps,
+        "//conditions:default": []
+    }),
+    tags = ["H20"],
+    exec_properties = {
+        'gpu': 'H20',
+    },
+)
+
 # Test for PyFlashinferDecodeAttnOp decode attention implementation
 py_test(
     name = "test_py_flashinfer_mha_decode",
