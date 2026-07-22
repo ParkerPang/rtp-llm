@@ -31,9 +31,8 @@ if is_cuda():
                 _has_cutlass_scaled_mm_blockwise_sm120_fp8,
             )
 
-            if _has_cutlass_scaled_mm_blockwise_sm120_fp8():
-                LinearFactory.register(CudaFp8VllmBlockwiseLinear)
-            else:
+            LinearFactory.register(CudaFp8VllmBlockwiseLinear)
+            if not _has_cutlass_scaled_mm_blockwise_sm120_fp8():
                 logger.warning(
                     "CudaFp8VllmBlockwiseLinear unavailable on sm12x: "
                     "cutlass_scaled_mm_blockwise_sm120_fp8 was not compiled. "

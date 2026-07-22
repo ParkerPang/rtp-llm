@@ -9,7 +9,11 @@ from rtp_llm.ops.compute_ops import LayerKVCache
 
 
 class KVCacheWriteOp:
-    """Operator for writing key-value pairs to paged KV cache."""
+    """Reference KV writer retained for fused-op numerical comparisons.
+
+    Production attention paths use the fused RoPE/KV-cache operators; this op
+    intentionally has no production caller.
+    """
 
     def __init__(
         self,

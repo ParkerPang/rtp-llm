@@ -42,13 +42,25 @@ class LinearBase(nn.Module, ABC):
 
         Returns:
             Whether this configuration can be handled
-
-        Raises:
-            ValueError: Implementations may reject a deterministic invalid
-                configuration with an actionable error when no fallback can
-                handle it. They must not raise for ordinary non-matches.
         """
         pass
+
+    @classmethod
+    def explain_rejection(
+        cls,
+        quant_config: object,
+        weight: torch.Tensor,
+        weight_scales: Optional[torch.Tensor],
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
+        weight_scale_2: Optional[torch.Tensor] = None,
+        input_scale: Optional[torch.Tensor] = None,
+    ) -> Optional[str]:
+        """Return an actionable rejection reason, or ``None`` for a non-match.
+
+        Strategy selection must remain side-effect free: ``can_handle`` only
+        returns a boolean, while deterministic diagnostics belong here.
+        """
+        return None
 
     @abstractmethod
     def __init__(
@@ -81,6 +93,53 @@ class LinearBase(nn.Module, ABC):
             max_len: max input length to cache.
         """
         pass
+
+    @staticmethod
+    def _restore_blockwise_weight_layout(
+        weight: torch.Tensor,
+        weight_scales: torch.Tensor,
+        block_size: int = 128,
+        mismatch_label: str = "Weight scale dim mismatch:",
+    ) -> tuple[torch.Tensor, torch.Tensor, int, int, int, int]:
+        """Restore loader tensors from logical (K,N) to physical (N,K).
+
+        FP8 blockwise loaders expose the contiguous physical ``(N, K)`` data
+        through logical tensor shapes ``(K, N)`` and ``(scale_K, scale_N)``.
+        Reshaping restores the physical views without transposing elements.
+        """
+        if weight.dim() != 2 or weight_scales.dim() != 2:
+            raise ValueError(
+                "Blockwise weight and scales must both be 2D tensors, got "
+                f"{weight.dim()}D and {weight_scales.dim()}D"
+            )
+        if not weight.is_contiguous():
+            raise ValueError(
+                "Blockwise weight must be contiguous before restoring its "
+                "physical (N, K) layout"
+            )
+        if not weight_scales.is_contiguous():
+            raise ValueError(
+                "Blockwise weight scales must be contiguous before restoring "
+                "their physical (scale_N, scale_K) layout"
+            )
+        K, N = weight.shape
+        scale_K, scale_N = weight_scales.shape
+        if (N + block_size - 1) // block_size != scale_N or (
+            K + block_size - 1
+        ) // block_size != scale_K:
+            raise ValueError(
+                f"{mismatch_label} N: {N}, scale_N: {scale_N}, "
+                f"K: {K}, scale_K: {scale_K} "
+                f"(expected ceil_div by {block_size})"
+            )
+        return (
+            weight.reshape(N, K),
+            weight_scales.reshape(scale_N, scale_K),
+            K,
+            N,
+            scale_K,
+            scale_N,
+        )
 
     @abstractmethod
     def forward(self, input: torch.Tensor) -> torch.Tensor:

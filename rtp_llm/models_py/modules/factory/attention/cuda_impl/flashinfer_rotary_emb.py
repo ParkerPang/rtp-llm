@@ -9,7 +9,11 @@ from rtp_llm.ops import AttentionConfigs
 
 
 class MhaRotaryEmbeddingOp(BaseRotaryEmbeddingOp):
-    """Rotary positional embedding for Multi-Head Attention (MHA)."""
+    """Reference MHA RoPE op retained for fused-op numerical comparisons.
+
+    Production attention paths use the fused RoPE/KV-cache operators; this op
+    intentionally has no production caller.
+    """
 
     def __init__(
         self,

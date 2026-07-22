@@ -9,10 +9,11 @@ from typing import Dict, List, Optional, Type
 import torch
 from torch import nn
 
-from rtp_llm.models_py.utils.arch import is_sm12x
 from rtp_llm.ops import HWKernelConfig
 
 from .linear_base import LinearBase
+
+logger = logging.getLogger(__name__)
 
 try:
     # Fix nvidia-cutlass-dsl cutlass module path on sm100 or upper device
@@ -26,20 +27,11 @@ try:
 
     if os.path.isdir(python_packages_dir) and python_packages_dir not in sys.path:
         sys.path.insert(0, python_packages_dir)
-        print(f"[sitecustomize] Added to sys.path: {python_packages_dir}")
+        logger.info(
+            "Added nvidia-cutlass-dsl path to sys.path: %s", python_packages_dir
+        )
 except ImportError:
     pass  # nvidia-cutlass-dsl not installed
-
-logger = logging.getLogger(__name__)
-
-
-def _has_sm120_fp8_binding() -> bool:
-    try:
-        from rtp_llm.ops.compute_ops import has_cutlass_scaled_mm_blockwise_sm120_fp8
-
-        return has_cutlass_scaled_mm_blockwise_sm120_fp8()
-    except ImportError:
-        return False
 
 
 class LinearFactory:
@@ -138,28 +130,25 @@ class LinearFactory:
         ]
 
         if not candidates:
-            if (
-                is_sm12x()
-                and weight_scales is not None
-                and weight_scales.dtype == torch.int32
-                and quant_config is not None
-                and quant_config.get_method() == "FP8_PER_BLOCK"
-            ):
-                raise ValueError(
-                    "SM120 FP8_PER_BLOCK requires float32 weight scales; "
-                    "UE8M0 int32 scales are only supported by DeepGEMM on sm90/sm100"
+            rejection_reasons = []
+            for strategy_class in cls._strategies:
+                reason = strategy_class.explain_rejection(
+                    quant_config,
+                    weight,
+                    weight_scales,
+                    hw_kernel_config,
+                    weight_scale_2,
+                    input_scale,
                 )
-            if (
-                is_sm12x()
-                and weight_scales is not None
-                and weight_scales.dtype == torch.float32
-                and quant_config is not None
-                and quant_config.get_method() == "FP8_PER_BLOCK"
-                and not _has_sm120_fp8_binding()
-            ):
+                if reason is not None:
+                    rejection_reasons.append(f"{strategy_class.__name__}: {reason}")
+            if rejection_reasons:
                 raise ValueError(
-                    "SM120 FP8_PER_BLOCK backend is unavailable; rebuild on x86 "
-                    "with --config=cuda12_9 (ENABLE_FP8_SM120)"
+                    "; ".join(rejection_reasons)
+                    + "; configuration: "
+                    + f"weight.dtype={weight.dtype}, "
+                    + f"has_scales={weight_scales is not None}, "
+                    + f"quant_config={quant_config}"
                 )
             raise ValueError(
                 f"No suitable Linear strategy found for:"

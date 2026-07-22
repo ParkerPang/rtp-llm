@@ -4,6 +4,10 @@ from typing import Optional
 
 import torch
 
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+    has_deep_gemm,
+    supports_deep_gemm,
+)
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
     CudaFp8DeepGEMMLinear,
@@ -11,7 +15,6 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear impo
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_flashinfer_linear import (
     CudaFp8FlashinferLinear,
 )
-from rtp_llm.models_py.utils.arch import is_sm12x
 from rtp_llm.ops import HWKernelConfig
 
 
@@ -19,6 +22,20 @@ class CudaFp8GEMMLinear(LinearBase):
     """CUDA FP8 GEMM wrapper."""
 
     FLASHINFER_M_THRESHOLD = CudaFp8FlashinferLinear.FLASHINFER_M_THRESHOLD
+
+    @classmethod
+    def _is_fp8_per_block_candidate(
+        cls,
+        quant_config: object,
+        weight: torch.Tensor,
+        weight_scales: Optional[torch.Tensor],
+    ) -> bool:
+        return (
+            weight_scales is not None
+            and quant_config is not None
+            and weight.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
+            and quant_config.get_method() == "FP8_PER_BLOCK"
+        )
 
     @classmethod
     def can_handle(
@@ -30,16 +47,31 @@ class CudaFp8GEMMLinear(LinearBase):
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
-        if weight_scales is None or quant_config is None:
+        if not cls._is_fp8_per_block_candidate(quant_config, weight, weight_scales):
             return False
-        if weight.dtype not in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
-            return False
-        # sm_12x routes PER_BLOCK FP8 to CudaFp8VllmBlockwiseLinear (DeepGEMM
-        # has no sm_12x cubin and FlashInfer PB stalls there). Required for
-        # LinearFactory uniqueness — both can_handle returning True throws.
-        if is_sm12x():
-            return False
-        return quant_config.get_method() == "FP8_PER_BLOCK"
+        return supports_deep_gemm()
+
+    @classmethod
+    def explain_rejection(
+        cls,
+        quant_config: object,
+        weight: torch.Tensor,
+        weight_scales: Optional[torch.Tensor],
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
+        weight_scale_2: Optional[torch.Tensor] = None,
+        input_scale: Optional[torch.Tensor] = None,
+    ) -> Optional[str]:
+        if (
+            not cls._is_fp8_per_block_candidate(quant_config, weight, weight_scales)
+            or supports_deep_gemm()
+        ):
+            return None
+        if not has_deep_gemm():
+            return "DeepGEMM is not installed; install the deep_gemm package"
+        return (
+            "DeepGEMM is unavailable on the current device; the bundled wheel "
+            "supports sm90/sm100 only"
+        )
 
     @torch.inference_mode()
     def __init__(

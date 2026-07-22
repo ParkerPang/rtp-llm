@@ -23,6 +23,6 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
-    tags = ["RTX_5000_PRO"],
+    tags = ["open_skip", "RTX_5000_PRO"],
     exec_properties = {'gpu':'RTX_5000_PRO'},
 )

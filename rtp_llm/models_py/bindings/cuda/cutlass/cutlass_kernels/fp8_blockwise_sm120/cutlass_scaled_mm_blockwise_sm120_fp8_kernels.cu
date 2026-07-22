@@ -72,13 +72,20 @@ void check_contiguous(torch::Tensor const& tensor, char const* name) {
     TORCH_CHECK(tensor.is_contiguous(), name, " must be contiguous");
 }
 
-std::pair<int, int> get_cached_compute_capability(int device) {
+struct CachedDeviceProperties {
+    int major;
+    int minor;
+    int sm_count;
+};
+
+CachedDeviceProperties get_cached_device_properties(int device) {
     // Inference worker threads normally stay on one CUDA device. Cache the
     // capability per thread so the GEMM hot path does not repeatedly enter
     // the CUDA Runtime while still validating the actual runtime device.
-    thread_local int cached_device = -1;
-    thread_local int cached_major  = -1;
-    thread_local int cached_minor  = -1;
+    thread_local int cached_device   = -1;
+    thread_local int cached_major    = -1;
+    thread_local int cached_minor    = -1;
+    thread_local int cached_sm_count = -1;
     if (cached_device != device) {
         cudaDeviceProp props;
         cudaError_t    status = cudaGetDeviceProperties(&props, device);
@@ -87,11 +94,12 @@ std::pair<int, int> get_cached_compute_capability(int device) {
                     device,
                     ": ",
                     cudaGetErrorString(status));
-        cached_device = device;
-        cached_major  = props.major;
-        cached_minor  = props.minor;
+        cached_device   = device;
+        cached_major    = props.major;
+        cached_minor    = props.minor;
+        cached_sm_count = props.multiProcessorCount;
     }
-    return {cached_major, cached_minor};
+    return {cached_major, cached_minor, cached_sm_count};
 }
 
 // SM12x family CUDA_ARCH gate (verbatim from vllm cutlass_extensions/common.hpp)
@@ -342,7 +350,10 @@ void launch_one(torch::Tensor&       D,
         epilogue_args.thread.bias_ptr = static_cast<ElementD const*>(bias->const_data_ptr());
     }
 
-    cutlass::KernelHardwareInfo    hw_info;
+    auto                        device_props = get_cached_device_properties(A.get_device());
+    cutlass::KernelHardwareInfo hw_info;
+    hw_info.device_id = A.get_device();
+    hw_info.sm_count  = device_props.sm_count;
     typename GemmKernel::Arguments args{
         cutlass::gemm::GemmUniversalMode::kGemm, prob_shape, mainloop_args, epilogue_args, hw_info, {}};
 
@@ -350,11 +361,16 @@ void launch_one(torch::Tensor&       D,
     GemmOp gemm_op;
     CUTLASS_CHECK(gemm_op.can_implement(args));
 
-    size_t     workspace_size    = gemm_op.get_workspace_size(args);
-    auto const workspace_options = torch::TensorOptions().dtype(torch::kUInt8).device(A.device());
-    auto       workspace         = torch::empty(static_cast<int64_t>(workspace_size), workspace_options);
+    size_t        workspace_size = gemm_op.get_workspace_size(args);
+    torch::Tensor workspace;
+    void*         workspace_ptr = nullptr;
+    if (workspace_size > 0) {
+        auto const workspace_options = torch::TensorOptions().dtype(torch::kUInt8).device(A.device());
+        workspace                    = torch::empty(static_cast<int64_t>(workspace_size), workspace_options);
+        workspace_ptr                = workspace.data_ptr();
+    }
 
-    CUTLASS_CHECK(gemm_op.run(args, workspace.data_ptr(), stream));
+    CUTLASS_CHECK(gemm_op.run(args, workspace_ptr, stream));
 }
 
 // M-tier dispatch + M<=64 swap-AB heuristic (verbatim from vllm
@@ -488,7 +504,9 @@ void cutlass_scaled_mm_blockwise_sm120_fp8(torch::Tensor&                      D
     }
 
     at::cuda::CUDAGuard device_guard{(char)A.get_device()};
-    auto [device_major, device_minor] = get_cached_compute_capability(A.get_device());
+    auto                device_props = get_cached_device_properties(A.get_device());
+    auto                device_major = device_props.major;
+    auto                device_minor = device_props.minor;
     TORCH_CHECK(device_major == 12,
                 "cutlass_scaled_mm_blockwise_sm120_fp8 requires sm_120 family, got sm_",
                 device_major,

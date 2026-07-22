@@ -40,7 +40,9 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
     """CUDA FP8 PER_BLOCK Linear for sm_120 (RTX PRO 5000 / 5090).
 
     Only BF16 activations, output, and bias are currently supported. K and N
-    must both be multiples of the 128-element block size.
+    must both be multiples of the 128-element block size. ``weight_scales`` is
+    required; its Optional annotation only preserves the LinearBase/factory
+    constructor signature.
 
     Scale layout (matches CUTLASS Sm120BlockwiseScaleConfig<1, 128, 128, MN, K>):
       - input_scales : (M, K//128), MN-major (M-stride=1, K-group-stride=M)
@@ -52,6 +54,48 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
     """
 
     @classmethod
+    def _classify_support(
+        cls,
+        quant_config: object,
+        weight: torch.Tensor,
+        weight_scales: Optional[torch.Tensor],
+    ) -> tuple[bool, Optional[str]]:
+        """Return whether this strategy matches and any actionable rejection."""
+        if (
+            weight_scales is None
+            or quant_config is None
+            or not is_sm12x()
+            or quant_config.get_method() != "FP8_PER_BLOCK"
+            or weight.dtype != torch.float8_e4m3fn
+        ):
+            return False, None
+        if weight_scales.dtype != torch.float32:
+            detail = f"got {weight_scales.dtype}"
+            if weight_scales.dtype == torch.int32:
+                detail += (
+                    "; UE8M0 int32 scales are only supported by DeepGEMM on sm90/sm100"
+                )
+            return (
+                False,
+                f"SM120 FP8_PER_BLOCK requires float32 weight scales, {detail}",
+            )
+        if not _has_cutlass_scaled_mm_blockwise_sm120_fp8():
+            return False, (
+                "SM120 FP8_PER_BLOCK backend is unavailable; rebuild on x86 "
+                "with --config=cuda12_9 (ENABLE_FP8_SM120)"
+            )
+        if weight.dim() != 2 or weight_scales.dim() != 2:
+            return False, (
+                "SM120 FP8_PER_BLOCK requires 2D weight and weight_scales tensors"
+            )
+        if weight.shape[0] % 128 != 0 or weight.shape[1] % 128 != 0:
+            return False, (
+                "SM120 FP8_PER_BLOCK requires K and N to be multiples of 128, "
+                f"got K={weight.shape[0]} and N={weight.shape[1]}"
+            )
+        return True, None
+
+    @classmethod
     def can_handle(
         cls,
         quant_config: object,
@@ -61,23 +105,22 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
-        if weight_scales is None or quant_config is None:
-            return False
-        if not is_sm12x():
-            return False
-        if not _has_cutlass_scaled_mm_blockwise_sm120_fp8():
-            return False
-        if weight.dtype != torch.float8_e4m3fn:
-            return False
-        if quant_config.get_method() != "FP8_PER_BLOCK":
-            return False
-        # vLLM kernel wants float32 PER_BLOCK scales — UE8M0 (int32) is a
-        # DeepGEMM-only encoding and is not supported here.
-        if weight_scales.dtype == torch.int32:
-            return False
-        if weight_scales.dtype != torch.float32:
-            return False
-        return True
+        supported, _ = cls._classify_support(quant_config, weight, weight_scales)
+        return supported
+
+    @classmethod
+    def explain_rejection(
+        cls,
+        quant_config: object,
+        weight: torch.Tensor,
+        weight_scales: Optional[torch.Tensor],
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
+        weight_scale_2: Optional[torch.Tensor] = None,
+        input_scale: Optional[torch.Tensor] = None,
+    ) -> Optional[str]:
+        """Explain actionable SM120 FP8_PER_BLOCK routing failures."""
+        _, reason = cls._classify_support(quant_config, weight, weight_scales)
+        return reason
 
     @torch.inference_mode()
     def __init__(
@@ -92,6 +135,8 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
         super().__init__(
             weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
         )
+        if weight_scales is None:
+            raise ValueError("SM120 FP8 blockwise GEMM requires weight_scales")
         self._gemm_op = _get_cutlass_scaled_mm_blockwise_sm120_fp8()
         if self._gemm_op is None:
             raise RuntimeError(
@@ -110,33 +155,20 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
                 f"{self.weight.dim()} and weight scale dim {self.weight_scales.dim()}"
             )
 
-        # Weight loading stores a contiguous physical (N, K) matrix through a
-        # logical (K, N) tensor shape. reshape(N, K) restores the physical
-        # CUTLASS row-major view without transposing or copying elements.
-        if not self.weight.is_contiguous():
-            raise ValueError(
-                "SM120 FP8 blockwise weight must be contiguous before restoring "
-                "its physical (N, K) layout"
-            )
-        self.K, self.N = self.weight.shape
-        self.scale_K, self.scale_N = self.weight_scales.shape
-        if self.K % 128 != 0 or self.N % 128 != 0:
+        logical_K, logical_N = self.weight.shape
+        if logical_K % 128 != 0 or logical_N % 128 != 0:
             raise ValueError(
                 f"SM120 FP8 blockwise GEMM requires K and N to be multiples of "
-                f"128, got K={self.K} and N={self.N}"
+                f"128, got K={logical_K} and N={logical_N}"
             )
-        self.weight = self.weight.reshape(self.N, self.K).contiguous()
-        self.weight_scales = self.weight_scales.reshape(
-            self.scale_N, self.scale_K
-        ).contiguous()
-
-        if (self.N + 127) // 128 != self.scale_N or (
-            self.K + 127
-        ) // 128 != self.scale_K:
-            raise ValueError(
-                f"Weight scale dim mismatch: N={self.N} scale_N={self.scale_N}, "
-                f"K={self.K} scale_K={self.scale_K} (expected ceil_div by 128)"
-            )
+        (
+            self.weight,
+            self.weight_scales,
+            self.K,
+            self.N,
+            self.scale_K,
+            self.scale_N,
+        ) = self._restore_blockwise_weight_layout(self.weight, self.weight_scales)
 
         if self.weight.dtype != torch.float8_e4m3fn:
             raise ValueError(
@@ -176,6 +208,10 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
             raise ValueError(
                 f"Input tensor inner dimension expected to be {self.K}, got {K}"
             )
+        if not input.is_contiguous():
+            raise ValueError("SM120 FP8 blockwise GEMM input must be contiguous")
+        if M == 0:
+            return torch.empty(0, self.N, dtype=torch.bfloat16, device=input.device)
 
         input_fp8, input_scales = sgl_per_token_group_quant_fp8(
             input,
