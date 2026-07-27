@@ -65,13 +65,15 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
 #endif
 
 #if defined(ENABLE_FP8_SM120)
+    rtp_ops_m.def("has_cutlass_scaled_mm_blockwise_sm120_fp8", &has_cutlass_scaled_mm_blockwise_sm120_fp8);
     rtp_ops_m.def("cutlass_scaled_mm_blockwise_sm120_fp8",
                   &cutlass_scaled_mm_blockwise_sm120_fp8,
                   py::arg("D"),
                   py::arg("A"),
                   py::arg("B"),
                   py::arg("A_sf"),
-                  py::arg("B_sf"));
+                  py::arg("B_sf"),
+                  py::arg("bias") = std::nullopt);
 #endif
 
     rtp_ops_m.def("moe_pre_reorder",

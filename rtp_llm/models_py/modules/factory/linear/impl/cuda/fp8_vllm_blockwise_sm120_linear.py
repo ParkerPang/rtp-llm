@@ -15,10 +15,25 @@ from rtp_llm.models_py.modules.factory.linear import LinearBase
 from rtp_llm.models_py.utils.arch import is_cuda, is_sm12x
 from rtp_llm.ops import HWKernelConfig
 
-if is_cuda() and is_sm12x():
-    from rtp_llm.ops.compute_ops import cutlass_scaled_mm_blockwise_sm120_fp8
-else:
-    cutlass_scaled_mm_blockwise_sm120_fp8 = None
+
+def _get_cutlass_scaled_mm_blockwise_sm120_fp8():
+    if not (is_cuda() and is_sm12x()):
+        return None
+    try:
+        from rtp_llm.ops.compute_ops import (
+            cutlass_scaled_mm_blockwise_sm120_fp8,
+            has_cutlass_scaled_mm_blockwise_sm120_fp8,
+        )
+
+        if has_cutlass_scaled_mm_blockwise_sm120_fp8():
+            return cutlass_scaled_mm_blockwise_sm120_fp8
+        return None
+    except ImportError:
+        return None
+
+
+def _has_cutlass_scaled_mm_blockwise_sm120_fp8() -> bool:
+    return _get_cutlass_scaled_mm_blockwise_sm120_fp8() is not None
 
 
 class CudaFp8VllmBlockwiseLinear(LinearBase):
@@ -50,13 +65,19 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
             return False
         if not is_sm12x():
             return False
+        if not _has_cutlass_scaled_mm_blockwise_sm120_fp8():
+            return False
         if weight.dtype != torch.float8_e4m3fn:
+            return False
+        if quant_config.get_method() != "FP8_PER_BLOCK":
             return False
         # vLLM kernel wants float32 PER_BLOCK scales — UE8M0 (int32) is a
         # DeepGEMM-only encoding and is not supported here.
+        if weight_scales.dtype == torch.int32:
+            return False
         if weight_scales.dtype != torch.float32:
             return False
-        return quant_config.get_method() == "FP8_PER_BLOCK"
+        return True
 
     @torch.inference_mode()
     def __init__(
@@ -71,7 +92,8 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
         super().__init__(
             weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
         )
-        if cutlass_scaled_mm_blockwise_sm120_fp8 is None:
+        self._gemm_op = _get_cutlass_scaled_mm_blockwise_sm120_fp8()
+        if self._gemm_op is None:
             raise RuntimeError(
                 "cutlass_scaled_mm_blockwise_sm120_fp8 op is not available; "
                 "this backend requires a cuda12_9_x86 build with -DENABLE_FP8_SM120."
@@ -88,6 +110,14 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
                 f"{self.weight.dim()} and weight scale dim {self.weight_scales.dim()}"
             )
 
+        # Weight loading stores a contiguous physical (N, K) matrix through a
+        # logical (K, N) tensor shape. reshape(N, K) restores the physical
+        # CUTLASS row-major view without transposing or copying elements.
+        if not self.weight.is_contiguous():
+            raise ValueError(
+                "SM120 FP8 blockwise weight must be contiguous before restoring "
+                "its physical (N, K) layout"
+            )
         self.K, self.N = self.weight.shape
         self.scale_K, self.scale_N = self.weight_scales.shape
         if self.K % 128 != 0 or self.N % 128 != 0:
@@ -95,8 +125,10 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
                 f"SM120 FP8 blockwise GEMM requires K and N to be multiples of "
                 f"128, got K={self.K} and N={self.N}"
             )
-        self.weight = self.weight.reshape(self.N, self.K)
-        self.weight_scales = self.weight_scales.reshape(self.scale_N, self.scale_K)
+        self.weight = self.weight.reshape(self.N, self.K).contiguous()
+        self.weight_scales = self.weight_scales.reshape(
+            self.scale_N, self.scale_K
+        ).contiguous()
 
         if (self.N + 127) // 128 != self.scale_N or (
             self.K + 127
@@ -126,6 +158,11 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
                 )
             if self.bias.dtype != torch.bfloat16:
                 raise ValueError(f"Bias dtype must be bfloat16, got {self.bias.dtype}")
+            self._bias_flat = self.bias.reshape(-1).contiguous()
+            if self._bias_flat.device != self.weight.device:
+                self._bias_flat = self._bias_flat.to(self.weight.device)
+        else:
+            self._bias_flat = None
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         if input.dtype != torch.bfloat16:
@@ -150,13 +187,12 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
         )
 
         output = torch.empty(M, self.N, dtype=torch.bfloat16, device=input.device)
-        cutlass_scaled_mm_blockwise_sm120_fp8(
+        self._gemm_op(
             output,
             input_fp8,
             self.weight,
             input_scales,
             self.weight_scales,
+            self._bias_flat,
         )
-        if self.bias is not None:
-            output = output + self.bias.to(output.dtype)
         return output

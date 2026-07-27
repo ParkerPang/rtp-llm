@@ -42,6 +42,11 @@ class LinearBase(nn.Module, ABC):
 
         Returns:
             Whether this configuration can be handled
+
+        Raises:
+            ValueError: Implementations may reject a deterministic invalid
+                configuration with an actionable error when no fallback can
+                handle it. They must not raise for ordinary non-matches.
         """
         pass
 

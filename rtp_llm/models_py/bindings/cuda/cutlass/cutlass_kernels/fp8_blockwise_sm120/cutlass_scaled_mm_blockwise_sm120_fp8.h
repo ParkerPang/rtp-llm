@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include <torch/all.h>
 
 // FP8 PER_BLOCK GEMM for sm_120 family (consumer Blackwell: RTX 5090 / RTX PRO
@@ -9,7 +11,7 @@
 // fp8-gemm-sm120.md). This kernel hits ~442 TFLOPs at 4096^3 (1.78x BF16).
 //
 // Inputs:
-//   D: (M, N) bf16/fp16 row-major
+//   D: (M, N) bf16 row-major
 //   A: (M, K) float8_e4m3fn row-major
 //   B: (N, K) float8_e4m3fn row-major contiguous weight.  CUTLASS sm120
 //      blockwise uses RowMajor-style packed strides for B (K-stride=1,
@@ -19,8 +21,14 @@
 //         scale_tma_aligned=False)
 //   B_sf: per-block weight scale, K-major layout (shape (N/128, K/128) ->
 //         flattened consistently with cutlass Sm120BlockwiseScaleConfig)
-void cutlass_scaled_mm_blockwise_sm120_fp8(torch::Tensor&       D,
-                                           torch::Tensor const& A,
-                                           torch::Tensor const& B,
-                                           torch::Tensor const& A_sf,
-                                           torch::Tensor const& B_sf);
+//   bias: optional per-output-channel bias (N,) same dtype as D. When present
+//         it is added in the GEMM epilogue (per-column bias), avoiding a
+//         separate elementwise add kernel.
+bool has_cutlass_scaled_mm_blockwise_sm120_fp8();
+
+void cutlass_scaled_mm_blockwise_sm120_fp8(torch::Tensor&                      D,
+                                           torch::Tensor const&                A,
+                                           torch::Tensor const&                B,
+                                           torch::Tensor const&                A_sf,
+                                           torch::Tensor const&                B_sf,
+                                           std::optional<torch::Tensor> const& bias = std::nullopt);
