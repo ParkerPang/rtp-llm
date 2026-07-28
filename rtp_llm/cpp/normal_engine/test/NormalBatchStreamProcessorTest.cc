@@ -248,6 +248,68 @@ TEST_F(NormalBatchStreamProcessorTest, testParallelDispatch) {
     thread_pool->waitFinish();
 }
 
+TEST_F(NormalBatchStreamProcessorTest, testBeamDispatchReordersReturnedRows) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 8;
+    model_config.vocab_size  = 4;
+    model_config.num_layers  = 1;
+    RuntimeConfig runtime_config;
+
+    auto query                                   = std::make_shared<GenerateInput>();
+    query->input_ids                             = hostIntBuffer({0});
+    query->generate_config                       = std::make_shared<GenerateConfig>();
+    query->generate_config->num_beams            = 2;
+    query->generate_config->max_new_tokens       = 2;
+    query->generate_config->return_logits        = true;
+    query->generate_config->return_hidden_states = true;
+    query->generate_config->reuse_cache          = false;
+
+    auto stream =
+        std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    auto complete_ids                        = stream->completeTokenIds();
+    complete_ids[0][1]                       = 1;
+    complete_ids[1][0]                       = 0;
+    complete_ids[1][1]                       = 2;
+    stream->complete_token_ids_->batch_size_ = 2;
+    stream->setSeqLength(2);
+    stream->setIsContextStream(false);
+    stream->resizeSubGenerateStatus(2);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    StreamGroups stream_groups({stream});
+    MergedOutput merge_outputs;
+    auto         raw_logits =
+        torch::tensor({10.0f, 20.0f, 30.0f, 40.0f, 40.0f, 30.0f, 20.0f, 10.0f}).reshape({2, 4}).to(torch::kCUDA);
+    auto raw_hidden_states                   = torch::tensor({1.0f, 2.0f, 3.0f, 4.0f}).reshape({2, 2}).to(torch::kCUDA);
+    merge_outputs.model_output.logits        = raw_logits;
+    merge_outputs.model_output.hidden_states = raw_hidden_states;
+    merge_outputs.sampler_output.token_ids   = hostIntBuffer({0, 2, 3, 0, 1, 2}).reshape({2, 3});
+    merge_outputs.sampler_output.beam_index  = hostIntBuffer({1, 0});
+    merge_outputs.sampler_output.cum_log_probs = torch::tensor({-0.3f, -0.5f}).to(torch::kCUDA);
+
+    NormalOutputDispatcher dispatcher;
+    auto                   status = dispatcher.dispatch(stream_groups, merge_outputs);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+    ASSERT_TRUE(stream->hasOutput());
+    auto output_result = stream->nextOutput();
+    ASSERT_TRUE(output_result.ok());
+    ASSERT_EQ(2, output_result.value().generate_outputs.size());
+
+    const auto& first  = output_result.value().generate_outputs[0];
+    const auto& second = output_result.value().generate_outputs[1];
+    ASSERT_TRUE(first.logits.has_value());
+    ASSERT_TRUE(second.logits.has_value());
+    ASSERT_TRUE(first.hidden_states.has_value());
+    ASSERT_TRUE(second.hidden_states.has_value());
+    EXPECT_TRUE(torch::equal(first.logits.value(), raw_logits.narrow(0, 1, 1).cpu()));
+    EXPECT_TRUE(torch::equal(second.logits.value(), raw_logits.narrow(0, 0, 1).cpu()));
+    EXPECT_TRUE(torch::equal(first.hidden_states.value(), raw_hidden_states.narrow(0, 1, 1).cpu()));
+    EXPECT_TRUE(torch::equal(second.hidden_states.value(), raw_hidden_states.narrow(0, 0, 1).cpu()));
+    EXPECT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{0, 2, 3}));
+    EXPECT_EQ(stream->completeTokenIdsVec(1), (std::vector<int>{0, 1, 2}));
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testSelectedTokenProbsWithBeamMapping) {
     NormalOutputDispatcher dispatcher;
     auto                   logits            = torch::tensor({1.0f, 2.0f, 3.0f, 1.0f}).reshape({2, 2}).to(torch::kCUDA);

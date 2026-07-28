@@ -185,12 +185,25 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     // construct update info
     torch::Tensor batch_hidden_states;
     if (stream->generateConfig()->return_hidden_states) {
-        batch_hidden_states = model_output.hidden_states.narrow(0, batch_idx_in, cur_batch_size);
+        auto raw_hidden_states = model_output.hidden_states.narrow(0, batch_idx_in, cur_batch_size);
+        if (has_beam_search && src_batch_indices.defined()) {
+            auto src_indices_device = src_batch_indices.to(raw_hidden_states.device(), torch::kLong);
+            batch_hidden_states     = raw_hidden_states.index_select(0, src_indices_device);
+        } else {
+            batch_hidden_states = raw_hidden_states;
+        }
     }
 
+    torch::Tensor raw_logits;
     torch::Tensor batch_logits;
-    if (stream->returnLogits() || stream->calculateSoftmaxProbs() || has_beam_search) {
-        batch_logits = model_output.logits.narrow(0, batch_idx_in, cur_batch_size);
+    if (stream->returnLogits() || stream->calculateSoftmaxProbs()) {
+        raw_logits = model_output.logits.narrow(0, batch_idx_in, cur_batch_size);
+        if (has_beam_search && src_batch_indices.defined()) {
+            auto src_indices_device = src_batch_indices.to(raw_logits.device(), torch::kLong);
+            batch_logits            = raw_logits.index_select(0, src_indices_device);
+        } else {
+            batch_logits = raw_logits;
+        }
     }
 
     torch::Tensor all_probs;
@@ -277,7 +290,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
 
     torch::Tensor current_softmax_result;
     if (stream->calculateSoftmaxProbs()) {
-        current_softmax_result = calculateSelectedTokenProbs(batch_logits, new_tokens, src_batch_indices);
+        current_softmax_result = calculateSelectedTokenProbs(raw_logits, new_tokens, src_batch_indices);
     }
 
     for (int i = 0; i < cur_batch_size; ++i) {
