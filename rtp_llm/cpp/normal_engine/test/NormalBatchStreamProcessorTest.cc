@@ -9,6 +9,7 @@
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "autil/LockFreeThreadPool.h"
 
 using namespace std;
 
@@ -36,7 +37,11 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
-    { GroupBase g; g.policy.group_type = CacheGroupType::FULL; cache_config.groups.push_back(g); }
+    {
+        GroupBase g;
+        g.policy.group_type = CacheGroupType::FULL;
+        cache_config.groups.push_back(g);
+    }
     cache_config.kv_block_stride_bytes = 4096;
     cache_config.kv_scale_stride_bytes = 256;
 
@@ -166,7 +171,11 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
     for (const auto& stream : streams) {
         stream->generate_status_->status = StreamState::RUNNING;
     }
-    { GroupBase g; g.policy.group_type = CacheGroupType::FULL; cache_config.groups.push_back(g); }
+    {
+        GroupBase g;
+        g.policy.group_type = CacheGroupType::FULL;
+        cache_config.groups.push_back(g);
+    }
     NormalBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
 
@@ -189,6 +198,53 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
     EXPECT_TRUE(softmax_probs.defined());
     EXPECT_EQ(2048, softmax_probs.numel());
     EXPECT_NEAR(0.731058, softmax_probs.data_ptr<float>()[1], 0.0001);
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testParallelDispatch) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 8;
+    model_config.vocab_size  = 4;
+    model_config.num_layers  = 1;
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    initFullCacheConfig(cache_config, model_config.num_layers);
+    RuntimeConfig runtime_config;
+
+    auto thread_pool = std::make_shared<autil::LockFreeThreadPool>(4, 16, nullptr, "DispatchTestPool");
+    ASSERT_TRUE(thread_pool->start());
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false, thread_pool);
+
+    auto make_stream = [&](int32_t input_token) {
+        auto query                             = std::make_shared<GenerateInput>();
+        query->input_ids                       = hostIntBuffer({input_token});
+        query->generate_config                 = std::make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 1;
+        query->generate_config->reuse_cache    = false;
+        auto stream =
+            std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        return stream;
+    };
+
+    auto         stream1 = make_stream(0);
+    auto         stream2 = make_stream(1);
+    StreamGroups stream_groups({stream1, stream2});
+
+    MergedOutput merge_outputs;
+    merge_outputs.sampler_output.token_ids     = hostIntBuffer({0, 2, 1, 3}).reshape({2, 2});
+    merge_outputs.sampler_output.cum_log_probs = torch::tensor({-0.1f, -0.2f}).to(torch::kCUDA);
+
+    auto status = processor.dispatch(stream_groups, merge_outputs);
+    EXPECT_TRUE(status.ok()) << status.ToString();
+    EXPECT_EQ((std::vector<int>{0, 2}), stream1->completeTokenIdsVec(0));
+    EXPECT_EQ((std::vector<int>{1, 3}), stream2->completeTokenIdsVec(0));
+
+    thread_pool->stop();
+    thread_pool->waitFinish();
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testLoss) {
@@ -245,7 +301,11 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     for (const auto& stream : streams) {
         stream->generate_status_->status = StreamState::RUNNING;
     }
-    { GroupBase g; g.policy.group_type = CacheGroupType::FULL; cache_config.groups.push_back(g); }
+    {
+        GroupBase g;
+        g.policy.group_type = CacheGroupType::FULL;
+        cache_config.groups.push_back(g);
+    }
     NormalBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
 
@@ -292,7 +352,11 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
-    { GroupBase g; g.policy.group_type = CacheGroupType::FULL; cache_config.groups.push_back(g); }
+    {
+        GroupBase g;
+        g.policy.group_type = CacheGroupType::FULL;
+        cache_config.groups.push_back(g);
+    }
     RuntimeConfig              runtime_config;
     NormalBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);

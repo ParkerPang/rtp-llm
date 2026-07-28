@@ -46,7 +46,7 @@ void releaseHostMemoryCache() {
 }
 
 std::vector<int32_t> flattenLayerToGroup(const CacheConfig& cache_config) {
-    auto layer_to_group_ids = cache_config.layerGroupIdsSnapshot();
+    auto                 layer_to_group_ids = cache_config.layerGroupIdsSnapshot();
     std::vector<int32_t> layer_to_group;
     layer_to_group.reserve(layer_to_group_ids.size());
     for (size_t layer = 0; layer < layer_to_group_ids.size(); ++layer) {
@@ -113,6 +113,24 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     initCacheManager(warm_up_result);
     RTP_LLM_LOG_INFO("create cache manager done");
 
+    if (params.concurrency_config.engine_async_worker_count > 0) {
+        const auto queue_size = static_cast<size_t>(std::max(1, 2 * params.concurrency_config.concurrency_limit));
+        thread_pool_          = std::make_shared<autil::LockFreeThreadPool>(
+            static_cast<size_t>(params.concurrency_config.engine_async_worker_count),
+            queue_size,
+            nullptr,
+            "EngineThreadPool");
+        if (!thread_pool_->start()) {
+            RTP_LLM_LOG_WARNING("failed to start engine async worker pool; falling back to serial dispatch");
+            thread_pool_.reset();
+        } else {
+            RTP_LLM_LOG_INFO("created engine async worker pool with %ld workers",
+                             params.concurrency_config.engine_async_worker_count);
+        }
+    } else {
+        RTP_LLM_LOG_INFO("engine async worker count is 0; using serial dispatch");
+    }
+
     initExecutor(params, propose_params_);
     if (propose_params_) {
         reserve_step_ = propose_params_->gen_num_per_circle + 1;
@@ -148,7 +166,8 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
                                            0,
                                            mla_ops_type_,
                                            kv_cache_group_num_,
-                                           kv_cache_layer_to_group_));
+                                           kv_cache_layer_to_group_,
+                                           thread_pool_));
     }
 }
 
@@ -289,7 +308,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     rtp_llm::setTraceMemory(true);
 
-    auto cache_config               = CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, false, 0);
+    auto cache_config = CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, false, 0);
     cache_config.seq_size_per_block = model_config_.attn_config.tokens_per_block;
     cache_config.block_num          = 5;
     ParallelismConfig temp_parallelism_config;
@@ -299,7 +318,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     if (!cache_manager->init()) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }
-    const auto& temp_cache_config = cache_manager->cacheConfig();
+    const auto& temp_cache_config   = cache_manager->cacheConfig();
     auto        temp_layer_to_group = flattenLayerToGroup(temp_cache_config);
     executor_.reset(new NormalExecutor(params,
                                        cache_manager,
@@ -426,6 +445,11 @@ absl::Status NormalEngine::stop() {
     running_ = false;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
+    if (thread_pool_) {
+        thread_pool_->stop();
+        thread_pool_->waitFinish();
+        thread_pool_.reset();
+    }
     return absl::OkStatus();
 }
 
