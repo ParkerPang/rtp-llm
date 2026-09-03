@@ -27,6 +27,7 @@ from rtp_llm.utils.concurrency_controller import (
     set_global_controller,
 )
 from rtp_llm.utils.oom_diag import install_oom_dump
+from rtp_llm.utils.parent_death_signal import install_parent_death_signal
 from rtp_llm.utils.process_manager import ProcessManager
 from rtp_llm.utils.util import copy_gemm_config
 
@@ -62,6 +63,7 @@ def local_rank_start(
     pipe_writer=None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
+    install_parent_death_signal()
     _install_hot_hook_runtime(f"backend_rank_{world_rank}")
     backend_manager = None
     logging.info(f"[PROCESS_START]Start local rank process")
@@ -413,6 +415,10 @@ def start_backend_server(
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
 ):
+    # The backend owns the CUDA context.  Ensure it cannot survive an abrupt
+    # death or replacement of the outer python-worker supervisor.
+    install_parent_death_signal()
+
     # Startup window only: turn SIGTERM/SIGINT into an exception so the teardown
     # below runs (a defaulted SIGTERM would kill the process with no cleanup);
     # local_rank_start / ProcessManager install the runtime handlers later.
